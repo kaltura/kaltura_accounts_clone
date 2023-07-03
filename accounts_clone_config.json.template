@@ -1,0 +1,30 @@
+{
+    "source": {
+        "partner_id": 123,
+        "partner_secret": "fsdf",
+        "service_url": "https://cdnapi-ev.kaltura.com"
+    },
+    "destination": {
+        "partner_id": 12312,
+        "partner_secret": "sdfsdf",
+        "service_url": "https://cdnapi-ev.kaltura.com"
+    },
+    "kaltura": {
+        "kaltura_user_id": "clone_metadata_profiles_script",
+        "session_duration": 604800,
+        "session_privileges": "all:*,disableentitlement",
+        "should_log": false
+    },
+    "cloning": {
+        "partner_account_configs": false,
+        "access_control_profiles": false,
+        "metadata_profiles": false,
+        "flavor_and_thumb_params": false,
+        "conversion_profiles": false,
+        "users": false,
+        "categories": false,
+        "entries" : true
+    },
+    "rebuild_cache": true,
+    "cache_file_path": "cached_data.json"
+}
