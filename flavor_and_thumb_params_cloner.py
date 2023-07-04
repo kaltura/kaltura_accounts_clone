@@ -74,7 +74,10 @@ class FlavorAndThumbParamsCloner:
                         if source_param.systemName == 'Multicast transcode':
                             self.logger.warning(f'Multicast flavors are no longer supported, if it is truly needed will require manual setup - take note!', extra={'color': 'magenta'})
                             continue
-                        self.logger.info(f'Found System Default {source_param.__class__.__name__} {source_param.systemName}/{source_param.id}/{source_param.tags} -> {dest_param.id} , update can only be done by pid -2, skipping add/update')
+                        if dest_param:
+                            self.logger.info(f'Found System Default {source_param.__class__.__name__} {source_param.systemName}/{source_param.id}/{source_param.tags} -> {dest_param.id} , update can only be done by pid -2, skipping add/update')
+                        else:
+                            self.logger.critical(f'System Default {source_param.__class__.__name__} {source_param.systemName}/{source_param.id}/{source_param.tags} could not be found on destination Kaltura service, pid 0 flavorParams can be done by pid -2, skipping add', extra={'color': 'red'})
                     else:
                         param = self.api_parser.clone_kaltura_obj(source_param)
                         try:

@@ -75,7 +75,11 @@ class ConversionProfileCloner:
                 conversion_profile.defaultEntryId = NotImplemented # reset template/default entry Id - this should be set manually post cloning entries
 
                 if source_profile.partnerId == 0: # only create or update conversion profile if it's not a system default conversion profile (i.e. owned by pid 0)
-                    self.logger.info(f'Found System Default {source_profile.__class__.__name__}{source_profile.systemName}/{source_profile.id} : {dest_profile.id}, update can only be done by pid -2, skipping add/update')
+                    if dest_profile:
+                        self.logger.info(f'Found System Default {source_profile.__class__.__name__}{source_profile.systemName}/{source_profile.id} : {dest_profile.id}, update can only be done by pid -2, skipping add/update')
+                    else:
+                        self.logger.critical(f'System Default {source_profile.__class__.__name__}{source_profile.systemName}/{source_profile.id} could not be found on destination Kaltura service, pid 0 conversion profile can be done by pid -2, skipping add', extra={'color': 'red'})
+                        continue
                 else:
                     # Map the source flavor params IDs to destination flavor params IDs
                     flavor_params_ids = []
