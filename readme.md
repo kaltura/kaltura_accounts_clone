@@ -16,6 +16,66 @@ The Kaltura Account Cloner can clone the following items:
 - Access control profiles
 - Entries and associated objects such as metadata, thumbnails, and conversion settings
 
+The output of the clone_all.py script is a json file with the following structure:
+
+```json
+{
+    "partner_account_configs": {
+        "SOURCE_PID": TARGET_PID
+        # The clone script only works on single PID couple, so othis will always be a one per clone_all.py execution
+    },
+    # For all other objects, it will be a dictionary of source_id: target_id 
+    "access_control_profiles": {
+        "SOURCE_ACL_ID_1": TARGET_ACL_ID_1
+        "SOURCE_ACL_ID_2": TARGET_ACL_ID_2
+        ...
+        "SOURCE_ACL_ID_N": TARGET_ACL_ID_N
+    },
+    "metadata_profiles": {
+        ...
+    },
+    "flavor_and_thumb_params": {
+        ...
+    },
+    "conversion_profiles": {
+        ...
+    },
+    "categories": {
+        ...
+    },
+    "users": {
+        ...
+    },
+    "groups": {
+        ...
+    },
+    "entries": {
+        ...
+    },
+    "cuepoints": {
+        ...
+    },
+    "attachments": {
+        ...
+    },
+    "entry_metadata_items": {
+        ...
+    },
+    "thumb_assets": {
+        ...
+    },
+    "flavor_assets": {
+        ...
+    },
+    "caption_assets": {
+        ...
+    },
+    "file_assets": {
+    	...
+    }
+}
+```
+
 Each object is mapped from the source account to the destination account, allowing you to keep track of which objects correspond to each other across accounts.
 
 ## Classes

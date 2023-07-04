@@ -976,31 +976,22 @@ class KalturaEntryContentAndAssetsCloner:
             self.logger.info(f"\u21B3 Cloning {type(entry_caption_assets[0]).__name__}s of entry id: src: {source_entry.id}, dest: {cloned_entry.id}")
 
             for source_asset in entry_caption_assets:
-                filter = KalturaAssetFilter()
-                filter.entryIdEqual = cloned_entry.id
-
-                # Try to get the asset from the destination
-                dest_assets = self.dest_client.caption.captionAsset.list(filter).objects
-
-                # If the asset exists in the destination, skip. Otherwise, add it.
-                if len(dest_assets) == 0:
-                    # add the captionAsset to the dest account
-                    cloned_asset: KalturaCaptionAsset = self.api_parser.clone_kaltura_obj(source_asset)
-                    # Modify as necessary for captionAsset specific attributes here...
-                    new_asset = self.dest_client.caption.captionAsset.add(cloned_entry.id, cloned_asset)
-                    # get the asset URL from the source account
-                    asset_url = self.source_client.caption.captionAsset.getUrl(source_asset.id)
-                    # create a KalturaUrlResource with the asset URL
-                    url_resource = KalturaUrlResource()
-                    url_resource.url = asset_url
-                    # add the URL resource to the new asset in the destination account
-                    self.dest_client.caption.captionAsset.setContent(new_asset.id, url_resource)
-                    cloned_assets.append(new_asset)
-                    self.entry_captions_mapping[source_asset.id] = new_asset.id
-                    self.logger.info(f"\u21B3 Created new {type(new_asset).__name__}: {new_asset.id}, for entry src: {source_entry.id} / dest: {cloned_entry.id}")
+                # TODO: Map to existing caption assets if found in destination account (need to craft a way to map since captionAsset doesn't have adminTags or referenceId)
+                # add the captionAsset to the dest account
+                cloned_asset: KalturaCaptionAsset = self.api_parser.clone_kaltura_obj(source_asset)
+                # Modify as necessary for captionAsset specific attributes here...
+                new_asset = self.dest_client.caption.captionAsset.add(cloned_entry.id, cloned_asset)
+                # get the asset URL from the source account
+                asset_url = self.source_client.caption.captionAsset.getUrl(source_asset.id)
+                # create a KalturaUrlResource with the asset URL
+                url_resource = KalturaUrlResource()
+                url_resource.url = asset_url
+                # add the URL resource to the new asset in the destination account
+                self.dest_client.caption.captionAsset.setContent(new_asset.id, url_resource)
+                cloned_assets.append(new_asset)
+                self.entry_captions_mapping[source_asset.id] = new_asset.id
+                self.logger.info(f"\u21B3 Created new {type(new_asset).__name__}: {new_asset.id}, for entry src: {source_entry.id} / dest: {cloned_entry.id}")
                 
-                # TODO: Map to existing caption assets if found in destination account
-
         return cloned_assets
 
     def _clone_entry_attachment_assets(self, source_entry: KalturaBaseEntry, cloned_entry: KalturaBaseEntry, entry_attachment_assets: List[KalturaAttachmentAsset]) -> List[KalturaAttachmentAsset]:

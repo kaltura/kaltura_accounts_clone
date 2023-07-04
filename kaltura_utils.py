@@ -76,7 +76,7 @@ def retry_on_exception(max_retries=3, delay=1, backoff=2, exceptions=(Exception,
                     return func(*args, **kwargs)
                 except exceptions as error:
                     msg = f"{str(error)}, Retrying in {mdelay} seconds..."
-                    logging.warning(msg, extra={'color': 'magenta'})
+                    logging.critical(f'retrying function due to error: {msg}', extra={'color': 'red'})
                     time.sleep(mdelay)
                     mtries -= 1
                     mdelay *= backoff
