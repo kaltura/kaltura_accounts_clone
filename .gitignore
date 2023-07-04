@@ -2,6 +2,7 @@
 # Clone accounts_clone_config.json.template into accounts_clone_config.json and modify the params there
 accounts_clone_config*.json
 cached_data*.json
+kaltura_log.txt
 
 # Byte-compiled / optimized / DLL files
 __pycache__/

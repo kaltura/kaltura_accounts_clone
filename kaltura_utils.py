@@ -37,7 +37,7 @@ class CustomFormatter(ColoredFormatter):
         return super(CustomFormatter, self).format(record)
 
 
-def create_custom_logger(logger: logging.Logger) -> None:
+def create_custom_logger(logger: logging.Logger, file_path:str = None) -> logging.Logger:
     """
     Configures the specified logger to use a custom handler and formatter.
 
@@ -47,15 +47,24 @@ def create_custom_logger(logger: logging.Logger) -> None:
 
     :param logger: The logger to configure.
     :type logger: logging.Logger
+    :param file_path: If passed, the log will be saved into a file at the path indicated in file_path
+    :type file_path: str
 
-    :return: None
+    :return: The configured logger
+    :rtype: logging.Logger
     """
 
     logging.getLogger().handlers = []
-    handler = logging.StreamHandler()
+    logger.handlers = []
+    if file_path is not None:
+        handler = logging.FileHandler(file_path) # save log into a file
+    else:
+        handler = logging.StreamHandler() # print log to console
+    
     handler.setFormatter(CustomFormatter('%(levelname)s:%(name)s:%(message)s'))
     logger.addHandler(handler)
     logger.setLevel(logging.INFO)
+    
     return logger
 
 def retry_on_exception(max_retries=3, delay=1, backoff=2, exceptions=(Exception,)):

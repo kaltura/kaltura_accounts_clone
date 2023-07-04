@@ -27,7 +27,7 @@ class KalturaCloner:
 
         :param config: a dictionary containing all necessary configuration values.
         """
-        self.logger = create_custom_logger(logging.getLogger(__name__))
+        self.logger = create_custom_logger(logging.getLogger('kaltura_clone_all'))
         self.config = config
         self.cache_file_path = self.config['cache_file_path']
         self.cached_data = self.load_cached_data() or {}
@@ -103,7 +103,7 @@ class KalturaCloner:
         """
         class KalturaLogger(IKalturaLogger):
             def __init__(self):
-                self.logger = create_custom_logger(logging.getLogger(__name__))
+                self.logger = create_custom_logger(logging.getLogger('kaltura_client'), 'kaltura_log.txt')
                 
             def log(self, msg):
                 self.logger.info(msg)
@@ -164,19 +164,25 @@ class KalturaCloner:
 
             for depends_on_key in depends_on_keys:
                 depends_on = next(t for t in self.tasks if t['key'] == depends_on_key)
-                cached_data_dependancy = self.rebuilt_cached_data[depends_on['key']]
-                if cached_data_dependancy is None:
+                cached_data_dependency = self.rebuilt_cached_data[depends_on['key']]
+                if cached_data_dependency is None:
                     self.rebuilt_cached_data[depends_on['key']] = self.execute_cloning(depends_on['class'], depends_on['method'], *depends_on.get('args', ()))
+                    self.dump_cache_data()
                 else:
                     self.logger.info(f"\nSkipped dependent task {depends_on['key']} - data was already available from cache", extra={'color': 'green'})
-                args += (cached_data_dependancy,)
+                args += (cached_data_dependency,)
 
             result = self.execute_cloning(task['class'], task['method'], *args)
             if isinstance(result, dict):
                 self.rebuilt_cached_data.update(result)
+                self.dump_cache_data()
             else:
                 self.rebuilt_cached_data[task['key']] = result
-
+                self.dump_cache_data()
+        
+        self.dump_cache_data()
+            
+    def dump_cache_data(self):
         # Save cache to file (we always save just in case we had to do partial rebuild of the cache due to missing cache keys)
         if any(self.rebuilt_cached_data.values()):
             with open(self.cache_file_path, 'w') as f:

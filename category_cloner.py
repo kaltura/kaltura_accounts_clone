@@ -1,11 +1,11 @@
 import logging
-from kaltura_utils import create_custom_logger
+from kaltura_utils import create_custom_logger, retry_on_exception
 from typing import Dict, List
 from KalturaClient import KalturaClient
 from KalturaClient.Plugins.Core import (KalturaCategory, KalturaCategoryFilter, KalturaCategoryOrderBy, KalturaCategoryUser, 
                                         KalturaCategoryUserFilter, KalturaFilterPager, KalturaCategoryUserOrderBy)
-from KalturaClient.Plugins.Metadata import KalturaMetadataFilter, KalturaMetadataObjectType
-from KalturaClient.exceptions import KalturaException
+from KalturaClient.Plugins.Metadata import KalturaMetadataFilter, KalturaMetadataObjectType, KalturaServiceBase
+from KalturaClient.exceptions import KalturaException, KalturaClientException
 from kaltura_api_schema_parser import KalturaApiSchemaParser
 
 
@@ -112,8 +112,8 @@ class KalturaCategoryCloner:
         if not dest_category and source_category.referenceId:
             dest_filter = KalturaCategoryFilter()
             dest_filter.referenceIdEqual = source_category.referenceId
-            dest_categories = self.dest_client.category.list(dest_filter, KalturaFilterPager()).objects
-
+            dest_categories = self._list_with_retry(self.dest_client.category, dest_filter, KalturaFilterPager()).objects
+            
             dest_category = dest_categories[0] if dest_categories else None
 
         category_copy:KalturaCategory = self.api_parser.clone_kaltura_obj(source_category)
@@ -164,6 +164,35 @@ class KalturaCategoryCloner:
             except KalturaException as e:
                 self.logger.error(f'Failed to update user {source_category_user.userId} in category {dest_category.id}/{dest_category.name}: {e}', extra={'color': 'red'})
     
+    @retry_on_exception(max_retries=5, delay=1, backoff=2, exceptions=(KalturaException, KalturaClientException))
+    def _list_with_retry(self, client_service: KalturaServiceBase, filter, pager=NotImplemented):
+        """
+        List objects from a Kaltura service with automatic retries in case of exceptions.
+
+        This function is designed to list items from a client service of Kaltura, 
+        with automatic retries upon encountering specified exceptions.
+
+        :param client_service: The client service from which items are to be listed.
+        :type client_service: Kaltura client service object
+        :param filter: The filter to be used while listing items.
+        :type filter: Kaltura filter object
+        :param pager: The pager to be used while listing items. It is optional and is not implemented by default.
+        :type pager: Kaltura pager object, optional
+
+        :return: The result of the client service's list method.
+        :rtype: Kaltura list response object
+
+        .. note::
+            This method uses a decorator, `retry_on_exception`, which automatically retries the method 
+            in case of `KalturaException` exceptions, up to a maximum of 5 attempts with an 
+            exponential backoff delay.
+
+        . seealso::
+            retry_on_exception: A method used to implement automatic retries on exceptions.
+        """
+        list_response = client_service.list(filter, pager)
+        return list_response
+    
     def _clone_category_users(self, source_category: KalturaCategory, dest_category: KalturaCategory):
         """
         Clones all users for a given category from the source client to the destination client.
@@ -182,8 +211,8 @@ class KalturaCategoryCloner:
         last_processed_at = None
 
         while True:
-            source_category_users = self.source_client.categoryUser.list(filter, pager).objects
-
+            source_category_users = self._list_with_retry(self.source_client.categoryUser, filter, pager).objects
+            
             if not source_category_users:
                 break
 

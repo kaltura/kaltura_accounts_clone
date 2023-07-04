@@ -11,7 +11,7 @@ from KalturaClient.Plugins.Core import (
     KalturaFlavorAssetFilter, KalturaThumbAssetFilter, KalturaFileAssetFilter, KalturaFileAssetObjectType,
     KalturaUserEntryFilter, KalturaCategoryEntryFilter, KalturaEntryStatus, KalturaAssetFilter, KalturaAsset,
     KalturaUrlResource, KalturaLanguage, KalturaFlavorAssetStatus, KalturaMediaType, KalturaLiveStreamAdminEntry,
-    KalturaConversionProfile, KalturaFilter, KalturaCategoryEntry, 
+    KalturaConversionProfile, KalturaFilter, KalturaCategoryEntry, KalturaMediaEntry
 )
 from KalturaClient.Plugins.Attachment import KalturaAttachmentAsset, KalturaAttachmentAssetFilter
 from KalturaClient.Plugins.Caption import KalturaCaptionAsset, KalturaCaptionAssetFilter
@@ -458,6 +458,23 @@ class KalturaEntryContentAndAssetsCloner:
             else:
                 self.logger.critical(f"Filed to clone metadata for userEntry src: {source_cuepoint_id}, dest: {destination_cuepoint_id} on entry src: {source_entry.id} / dest: {cloned_entry.id}", extra={'color': 'red'})
 
+        # Fetching and cloning timed thumbnail assets for cuepoints that have thumbnails (chapters/slides)
+        timed_thumb_assets = self._fetch_assets(
+            source_entry, 
+            self.source_client.thumbAsset, 
+            KalturaThumbAssetFilter(), 
+            ['KalturaTimedThumbAsset']
+        )
+        new_timed_thumb_assets = self._clone_entry_assets(
+            source_entry=source_entry,
+            cloned_entry=cloned_entry,
+            entry_assets=timed_thumb_assets.get('assets'),
+            src_client_service=self.source_client.thumbAsset,
+            dest_client_service=self.dest_client.thumbAsset,
+            asset_id_attr='thumbParamsId',
+            asset_type=KalturaThumbAsset
+        )
+        
         return cloned_entry
 
     @retry_on_exception(max_retries=5, delay=1, backoff=2, exceptions=(KalturaException, KalturaClientException))
@@ -617,10 +634,19 @@ class KalturaEntryContentAndAssetsCloner:
                 if not asset_exists_in_dest or asset_type is KalturaTimedThumbAsset:
                     # add the Asset to the dest account
                     cloned_asset = self.api_parser.clone_kaltura_obj(source_asset)
+                    if hasattr(cloned_asset, 'cuePointId'):
+                        source_cuepoint_id = getattr(source_asset, 'cuePointId')
+                        mapped_cuepoint_id = self.entry_cuepoints_mapping.get(source_cuepoint_id, NotImplemented)
+                        cloned_asset.cuePointId = mapped_cuepoint_id
+                        if not mapped_cuepoint_id and asset_type is KalturaTimedThumbAsset:
+                            self.logger.critical(f'\u21B3 Tried to clone a TimeThumbnailAsset for cuePoint src id: {source_cuepoint_id}, that is not mapped in the destination account', extra={'color': 'red'})
+                            continue # if we found a timed thumb asset that doesn't have an associated cuepoint - skip its clone, it's invalid
+                    
                     if hasattr(source_asset, 'language') and type(source_asset.language).__name__ == 'KalturaLanguage':
                         # fix a weird bug where the value of language is returned wrongly
                         if source_asset.language.getValue() == 'esp':
                             cloned_asset.language = KalturaLanguage.ES
+                    
                     if asset_id_attr is not None:
                         setattr(cloned_asset, asset_id_attr, self.flavor_and_thumb_params_mapping.get(getattr(source_asset, asset_id_attr), NotImplemented))
                     new_asset = dest_client_service.add(cloned_entry.id, cloned_asset)
@@ -739,11 +765,14 @@ class KalturaEntryContentAndAssetsCloner:
             `_clone_entry_file_assets`: Clones file assets from the source entry to the cloned entry.
         """
         self.logger.info(f"\u21B3 Cloning all assets of {type(source_entry).__name__} src: {source_entry.id}, {source_entry.name}")
-
+        new_attachment_assets = None
+        new_caption_assets = None
+        new_flavor_assets = None
+        new_thumb_assets = None
+        new_file_assets = None
         # if it's an image entry - add the source image to the newly cloned entry
         entry_type = type(source_entry).__name__
-        media_type = source_entry.mediaType.getValue()
-        if entry_type == 'KalturaMediaEntry' and media_type == KalturaMediaType.IMAGE:
+        if entry_type == 'KalturaMediaEntry' and source_entry.mediaType.getValue() == KalturaMediaType.IMAGE:
             ks = self.source_client.getKs().decode('utf-8') # we add a KS to the raw url to ensure there will be no issues pulling the image source
             # to ensure this URL doesn't expire before the destination account manages to clone it, make sure the KS provided is long enough (few days)
             image_url = f"https://cfvod.kaltura.com/p/{source_entry.partnerId}/sp/{source_entry.partnerId}00/raw/entry_id/{source_entry.id}/ks/{ks}"
@@ -760,41 +789,45 @@ class KalturaEntryContentAndAssetsCloner:
             ['KalturaAttachmentAsset', 'KalturaTranscriptAsset']
         )
         new_attachment_assets = self._clone_entry_attachment_assets(source_entry, cloned_entry, attachment_assets.get('assets'))
+                
+                
+        if isinstance(source_entry, KalturaMediaEntry):
+            
+            # Fetching and cloning caption assets
+            caption_assets = self._fetch_assets(
+                source_entry, 
+                self.source_client.caption.captionAsset, 
+                KalturaCaptionAssetFilter(), 
+                ['KalturaCaptionAsset']
+            )
+            new_caption_assets = self._clone_entry_caption_assets(source_entry, cloned_entry, caption_assets.get('assets'))
+            
+            # Fetching and cloning flavor assets (only accessible and ready assets)
+            flavor_assets_filter = KalturaFlavorAssetFilter()
+            flavor_assets_filter.statusEqual = KalturaFlavorAssetStatus.READY
+            flavor_assets = self._fetch_assets(
+                source_entry, 
+                self.source_client.flavorAsset, 
+                flavor_assets_filter, 
+                ['KalturaFlavorAsset', 'KalturaLiveAsset']
+            )
+            new_flavor_assets = self._clone_entry_assets(
+                source_entry=source_entry,
+                cloned_entry=cloned_entry,
+                entry_assets=flavor_assets.get('assets'),
+                src_client_service=self.source_client.flavorAsset,
+                dest_client_service=self.dest_client.flavorAsset,
+                asset_id_attr='flavorParamsId',
+                asset_type=KalturaFlavorAsset
+            )
         
-        # Fetching and cloning caption assets
-        caption_assets = self._fetch_assets(
-            source_entry, 
-            self.source_client.caption.captionAsset, 
-            KalturaCaptionAssetFilter(), 
-            ['KalturaCaptionAsset']
-        )
-        new_caption_assets = self._clone_entry_caption_assets(source_entry, cloned_entry, caption_assets.get('assets'))
-        
-        # Fetching and cloning flavor assets (only accessible and ready assets)
-        flavor_assets_filter = KalturaFlavorAssetFilter()
-        flavor_assets_filter.statusEqual = KalturaFlavorAssetStatus.READY
-        flavor_assets = self._fetch_assets(
-            source_entry, 
-            self.source_client.flavorAsset, 
-            flavor_assets_filter, 
-            ['KalturaFlavorAsset', 'KalturaLiveAsset']
-        )
-        new_flavor_assets = self._clone_entry_assets(
-            source_entry=source_entry,
-            cloned_entry=cloned_entry,
-            entry_assets=flavor_assets.get('assets'),
-            src_client_service=self.source_client.flavorAsset,
-            dest_client_service=self.dest_client.flavorAsset,
-            asset_id_attr='flavorParamsId',
-            asset_type=KalturaFlavorAsset
-        )
         
         # Fetching and cloning thumbnail assets
         thumb_assets = self._fetch_assets(
             source_entry, 
             self.source_client.thumbAsset, 
             KalturaThumbAssetFilter(), 
-            ['KalturaThumbAsset', 'KalturaTimedThumbAsset']
+            ['KalturaThumbAsset'] # only clone thumb assets, we will clone timedThumbAssets after cloning cuepoints
         )
         new_thumb_assets = self._clone_entry_assets(
             source_entry=source_entry,
@@ -853,8 +886,11 @@ class KalturaEntryContentAndAssetsCloner:
         .. seealso::
             :func:`_list_with_retry`, :func:`_iterate_object_metadata`
         """
-        asset_filter.entryIdEqual = source_entry.id
-        asset_filter.objectIdEqual = source_entry.id
+        if hasattr(asset_filter, 'entryIdEqual'):
+            asset_filter.entryIdEqual = source_entry.id
+        if hasattr(asset_filter, 'objectIdEqual'):
+            asset_filter.objectIdEqual = source_entry.id
+            
         pager = KalturaFilterPager()
         pager.pageSize = 500
         pager.pageIndex = 1
@@ -871,14 +907,19 @@ class KalturaEntryContentAndAssetsCloner:
                 for asset in assets_paged:
                     asset_type = type(asset).__name__
                     if asset_type in supported_types:
-                        self.logger.info(f"\u21B3\u2794 Found {asset_type}: {asset.id} for entry id: {source_entry.id}")
-                        all_assets.append(asset)  # add asset to the list
-                        metadata_object_type = self.object_type_metadata_mapping.get(type(asset))
-                        if metadata_object_type is not None: # only clone metadata if this object has custom metadata supported
-                            self.logger.info(f"\u21B3\u2794\u2794 Iterating over metadata of {asset_type}: {asset.id} for entry id: {source_entry.id}")
-                            all_metadata[asset.id] = self._iterate_object_metadata(asset)
+                        if ( (hasattr(asset, 'entryId') and asset.entryId == source_entry.id) or
+                            (hasattr(asset, 'objectId') and asset.objectId == source_entry.id) ):
+                            self.logger.info(f"\u21B3\u2794 Found {asset_type}: {asset.id} for entry id: {source_entry.id}")
+                            all_assets.append(asset)  # add asset to the list
+                            metadata_object_type = self.object_type_metadata_mapping.get(type(asset))
+                            if metadata_object_type is not None: # only clone metadata if this object has custom metadata supported
+                                self.logger.info(f"\u21B3\u2794\u2794 Iterating over metadata of {asset_type}: {asset.id} for entry id: {source_entry.id}")
+                                all_metadata[asset.id] = self._iterate_object_metadata(asset)
+                        else:
+                            self.logger.critical(f"\u21B3\u2794 List returned misaligned assets to source entry {asset_type}: {asset.id} for entry id: {source_entry.id}. Supported: {supported_types}", extra={'color': 'red'})
                     else:
-                        self.logger.critical(f"\u21B3\u2794 Unsupported {asset_type}: {asset.id} for entry id: {source_entry.id}. Supported: {supported_types}", extra={'color': 'red'})
+                        if asset_type != 'KalturaThumbAsset' and asset_type != 'KalturaTimedThumbAsset': # we skip this log for ThumbAsset and TimedThumbAsset because they're on the same object but must be cloned at seperate times
+                            self.logger.critical(f"\u21B3\u2794 Unsupported {asset_type}: {asset.id} for entry id: {source_entry.id}. Supported: {supported_types}", extra={'color': 'red'})
 
                 pager.pageIndex += 1  # move to the next page
             except KalturaException as error:
@@ -976,21 +1017,23 @@ class KalturaEntryContentAndAssetsCloner:
             self.logger.info(f"\u21B3 Cloning {type(entry_caption_assets[0]).__name__}s of entry id: src: {source_entry.id}, dest: {cloned_entry.id}")
 
             for source_asset in entry_caption_assets:
-                # TODO: Map to existing caption assets if found in destination account (need to craft a way to map since captionAsset doesn't have adminTags or referenceId)
-                # add the captionAsset to the dest account
-                cloned_asset: KalturaCaptionAsset = self.api_parser.clone_kaltura_obj(source_asset)
-                # Modify as necessary for captionAsset specific attributes here...
-                new_asset = self.dest_client.caption.captionAsset.add(cloned_entry.id, cloned_asset)
-                # get the asset URL from the source account
-                asset_url = self.source_client.caption.captionAsset.getUrl(source_asset.id)
-                # create a KalturaUrlResource with the asset URL
-                url_resource = KalturaUrlResource()
-                url_resource.url = asset_url
-                # add the URL resource to the new asset in the destination account
-                self.dest_client.caption.captionAsset.setContent(new_asset.id, url_resource)
-                cloned_assets.append(new_asset)
-                self.entry_captions_mapping[source_asset.id] = new_asset.id
-                self.logger.info(f"\u21B3 Created new {type(new_asset).__name__}: {new_asset.id}, for entry src: {source_entry.id} / dest: {cloned_entry.id}")
+                if source_asset.entryId == source_entry.id: # if we're given an asset that doesn't belong to the source entry we were given, skip it
+                    # TODO: Map to existing caption assets if found in destination account (need to craft a way to map since captionAsset doesn't have adminTags or referenceId)
+                    # add the captionAsset to the dest account
+                    cloned_asset: KalturaCaptionAsset = self.api_parser.clone_kaltura_obj(source_asset)
+                    cloned_asset.entryId = cloned_entry.id
+                    # Modify as necessary for captionAsset specific attributes here...
+                    new_asset = self.dest_client.caption.captionAsset.add(cloned_entry.id, cloned_asset)
+                    # get the asset URL from the source account
+                    asset_url = self.source_client.caption.captionAsset.getUrl(source_asset.id)
+                    # create a KalturaUrlResource with the asset URL
+                    url_resource = KalturaUrlResource()
+                    url_resource.url = asset_url
+                    # add the URL resource to the new asset in the destination account
+                    self.dest_client.caption.captionAsset.setContent(new_asset.id, url_resource)
+                    cloned_assets.append(new_asset)
+                    self.entry_captions_mapping[source_asset.id] = new_asset.id
+                    self.logger.info(f"\u21B3 Created new {type(new_asset).__name__}: {new_asset.id}, for entry src: {source_entry.id} / dest: {cloned_entry.id}")
                 
         return cloned_assets
 
@@ -1323,24 +1366,33 @@ class KalturaEntryContentAndAssetsCloner:
 
         # Loop through the source associations
         for source_association in source_associations:
-            # Create a new user association object based on the source association
-            cloned_association = type(source_association)()
-            cloned_association.entryId = cloned_entry.id
-            cloned_association.userId = source_association.userId
-            cloned_association.status = source_association.status.getValue() if source_association.status else NotImplemented
-            cloned_association.type = source_association.type.getValue() if source_association.type else NotImplemented
-            cloned_association.extendedStatus = source_association.extendedStatus.getValue() if hasattr(source_association, 'extendedStatus') else NotImplemented
-            
-            # Try to add the new association to the destination client and save the returned object
-            try:
-                new_association = self.dest_client.userEntry.add(cloned_association)
-                cloned_association_ids[source_association.id] = new_association.id
-
-                self.logger.info(f"Cloned user-entry {new_association.id} - {new_association.userId} for entry {new_association.entryId}")
-            except Exception as error:
-                # Log the error and continue with the next user association
-                self.logger.critical(f"Failed to clone user-entry association for entry {source_association.entryId}. Error: {str(error)}", extra={'color': 'red'})
-
+            filter = KalturaUserEntryFilter()
+            filter.entryIdEqual = cloned_entry.id
+            filter.userIdEqual = source_association.userId
+            dest_association = self.dest_client.userEntry.list(filter).objects
+            if len(dest_association) == 0:
+                # Create a new user association object based on the source association
+                cloned_association = type(source_association)()
+                cloned_association.entryId = cloned_entry.id
+                cloned_association.userId = source_association.userId
+                cloned_association.status = source_association.status.getValue() if source_association.status else NotImplemented
+                cloned_association.type = source_association.type.getValue() if source_association.type else NotImplemented
+                extended_status = source_association.extendedStatus
+                cloned_association.extendedStatus = extended_status.getValue() if extended_status else NotImplemented
+                
+                # Try to add the new association to the destination client and save the returned object
+                try:
+                    new_association = self.dest_client.userEntry.add(cloned_association)
+                    cloned_association_ids[source_association.id] = new_association.id
+                    self.logger.info(f"Cloned user-entry {new_association.id} - {new_association.userId} for entry {new_association.entryId}")
+                except Exception as error:
+                    # Log the error and continue with the next user association
+                    self.logger.critical(f"Failed to clone user-entry association for entry {source_association.entryId}. Error: {str(error)}", extra={'color': 'red'})
+            else:
+                dest_association_id = dest_association[0].id
+                cloned_association_ids[str(source_association.id)] = dest_association_id
+                self.logger.info(f"Found existing user-entry {dest_association_id} - {dest_association[0].userId} for entry {dest_association[0]                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                .entryId}")
+                
         # Return the list of cloned associations
         return cloned_association_ids
 
