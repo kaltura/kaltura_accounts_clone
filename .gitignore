@@ -3,6 +3,7 @@
 accounts_clone_config*.json
 cached_data*.json
 kaltura_log.txt
+.DS_STORE
 
 # Byte-compiled / optimized / DLL files
 __pycache__/

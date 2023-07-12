@@ -92,6 +92,7 @@ class KalturaUserCloner:
                 if dest_user:
                     try:
                         dest_user_copy: KalturaUser = self.api_parser.clone_kaltura_obj(source_user, False) # skip insertOnly attributes
+                        dest_user_copy.id = NotImplemented
                         updated_user = self.dest_client.user.update(dest_user.id, dest_user_copy)
                         self.logger.info(f'Found & Updated User {source_user.id} -> {updated_user.id}')
                     except KalturaException as e:

@@ -122,9 +122,10 @@ List of pending tasks or improvements:
 
 - [x] Create classes for cloning different object types
 - [x] Add error handling and logging
+- [x] Call thumbnail set as default action if source thumbAsset was default
+- [x] Verify cloning of document objects and their associations
 - [ ] Verify cloning of fileAsset objects and their associations
 - [ ] Verify cloning of data objects and their associations
-- [ ] Verify cloning of document objects and their associations
 - [ ] Implement support for Player uiConf cloning
 - [ ] Implement support for Playlists cloning
 - [ ] Implement support for KalturaPath interactive videos cloning
