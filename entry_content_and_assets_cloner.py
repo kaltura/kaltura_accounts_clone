@@ -1,5 +1,8 @@
 import re
+import os
 import logging
+import inspect
+import requests
 from kaltura_utils import create_custom_logger, retry_on_exception
 from typing import Type, List, Dict, Union, Any
 import xml.etree.ElementTree as ET
@@ -11,8 +14,9 @@ from KalturaClient.Plugins.Core import (
     KalturaFlavorAssetFilter, KalturaThumbAssetFilter, KalturaFileAssetFilter, KalturaFileAssetObjectType,
     KalturaUserEntryFilter, KalturaCategoryEntryFilter, KalturaEntryStatus, KalturaAssetFilter, KalturaAsset,
     KalturaUrlResource, KalturaLanguage, KalturaFlavorAssetStatus, KalturaMediaType, KalturaLiveStreamAdminEntry,
-    KalturaConversionProfile, KalturaFilter, KalturaCategoryEntry, KalturaMediaEntry
+    KalturaConversionProfile, KalturaFilter, KalturaCategoryEntry, KalturaMediaEntry, KalturaUploadedFileTokenResource, KalturaDataEntry
 )
+from KalturaClient.Plugins.Document import KalturaDocumentEntry
 from KalturaClient.Plugins.Attachment import KalturaAttachmentAsset, KalturaAttachmentAssetFilter
 from KalturaClient.Plugins.Caption import KalturaCaptionAsset, KalturaCaptionAssetFilter
 from KalturaClient.Plugins.Annotation import KalturaAnnotation
@@ -156,7 +160,7 @@ class KalturaEntryContentAndAssetsCloner:
             # Set up a filter to fetch all entries
             entry_filter = KalturaBaseEntryFilter()
             entry_filter.typeEqual = entry_type
-            # entry_filter.idEqual = '1_8uyk8dm8' #uncomment to test specific entry ID for debugging 
+            # entry_filter.idEqual = '0_da9awm2l' #uncomment to test specific entry ID for debugging 
             entry_filter.orderBy = KalturaBaseEntryOrderBy.CREATED_AT_ASC
             entry_filter.createdAtGreaterThanOrEqual = NotImplemented
             entry_filter.statusIn = self.entry_statuses_to_clone
@@ -299,14 +303,16 @@ class KalturaEntryContentAndAssetsCloner:
 
         # clone all the children that have this entry as their parentId -
         for src_entry in entry_as_parent_children:
-            cloned_entry = self._clone_entry(src_entry, skip_if_exist)
+            parent_source_id = parent_entry.id
+            cloned_entry = self._clone_entry(src_entry, skip_if_exist, parent_source_id=parent_source_id)
             cloned_src_entries.append(src_entry)  # add it to the cloned source entries list
             self.entry_mapping[src_entry.id] = cloned_entry.id  # add to source-dest mapping
             self.logger.info(f"\u21B3\u2794 Cloned {cloned_entry.id} from parent {parent_entry.id}/ source: {source_entry.id}")
 
         # clone all the children that have this entry as their rootId -
         for src_entry in entry_as_root_children:
-            cloned_entry = self._clone_entry(src_entry, skip_if_exist)
+            root_source_id = parent_entry.id
+            cloned_entry = self._clone_entry(src_entry, skip_if_exist, root_source_id=root_source_id)
             cloned_src_entries.append(src_entry)  # add it to the cloned source entries list
             self.entry_mapping[src_entry.id] = cloned_entry.id  # add to source-dest mapping
             self.logger.info(f"\u21B3\u2794 Cloned {cloned_entry.id} from root {parent_entry.id}/ source: {source_entry.id}")
@@ -314,7 +320,7 @@ class KalturaEntryContentAndAssetsCloner:
         # return the list of source entries objects that were cloned
         return cloned_src_entries
 
-    def _clone_entry(self, source_entry: KalturaBaseEntry, skip_if_exist:bool = False) -> KalturaBaseEntry:
+    def _clone_entry(self, source_entry: KalturaBaseEntry, skip_if_exist:bool = False, parent_source_id:str = None, root_source_id:str = None) -> KalturaBaseEntry:
         """
         Clones an entry from the source to the destination Kaltura account, 
         with special handling for live stream entries.
@@ -323,6 +329,10 @@ class KalturaEntryContentAndAssetsCloner:
         :type source_entry: KalturaBaseEntry
         :param skip_if_exist: If True, will not update an existing object, it will skip objects that already exist in dest account.
         :type skip_if_exist: bool
+        :param parent_source_id: if not None, indicates the id of the parent entry id.
+        :type parent_source_id: str
+        :param root_source_id: if not None, indicates the id of the root entry id.
+        :type root_source_id: str
         
         :return: The cloned entry in the destination account.
         :rtype: KalturaBaseEntry
@@ -380,8 +390,12 @@ class KalturaEntryContentAndAssetsCloner:
             cloned_entry.endDate = NotImplemented
             
         dest_filter = KalturaBaseEntryFilter()
-        dest_filter.adminTagsLike = source_entry.id
         dest_filter.statusIn = self.entry_statuses_to_clone
+        dest_filter.adminTagsLike = source_entry.id
+        if parent_source_id is not None:
+            dest_filter.parentEntryIdEqual = parent_source_id
+        if root_source_id is not None:
+            dest_filter.rootEntryIdEqual = root_source_id
         # clone the assets of the entry (flavors, thumbnails, images, etc.)
         cloned_entry = self._clone_entry_and_assets(source_entry, cloned_entry, dest_filter, skip_if_exist)
         
@@ -420,6 +434,12 @@ class KalturaEntryContentAndAssetsCloner:
         cloned_entry_type = type(cloned_entry).__name__
         if cloned_entry_type in ['KalturaLiveStreamAdminEntry', 'KalturaLiveStreamEntry']:
             client_service = self.dest_client.liveStream
+        elif cloned_entry_type == 'KalturaDataEntry':
+            client_service = self.dest_client.data
+        elif cloned_entry_type == ['KalturaMediaEntry']:
+            client_service = self.dest_client.media
+        elif cloned_entry_type == ['KalturaExternalMediaEntry']:
+            client_service = self.dest_client.externalMedia
         else:
             client_service = self.dest_client.baseEntry
             
@@ -767,6 +787,63 @@ class KalturaEntryContentAndAssetsCloner:
             client_name = "source" if from_source else "destination"
             self.logger.critical(f"Failed to fetch entries from {client_name}: {error}", extra={'color': 'red'})
             return []
+    
+    def _get_raw_url(self, entry:KalturaBaseEntry, client:KalturaClient) -> str:
+        """
+        Creates a raw url to download the source of a given entry
+
+        :param entry: The entry object to create a raw url for
+        :type entry: KalturaBaseEntry
+        :param client: The Kaltura client to get the ks from
+        :type client: KalturaClient
+
+        :return: The raw url of the provided entry
+        :rtype: str
+
+        .. note:: 
+            to ensure this URL doesn't expire before the destination account manages to clone it, make sure the KS provided is long enough (few days)
+        """
+        ks = client.getKs().decode('utf-8') # we add a KS to the raw url to ensure there will be no issues pulling the source file (acl, entitlements, etc)
+        raw_url = f"https://cfvod.kaltura.com/p/{entry.partnerId}/sp/{entry.partnerId}00/raw/entry_id/{entry.id}/ks/{ks}"
+        return raw_url
+    
+    def _is_text_file(self, file_path:str) -> bool:
+        """
+        Tests if a given file is text based or binary
+
+        :param file_path: The file path of the file to test
+        :type file_path: str
+        
+        :return: True if the file is text based, False if binary
+        :rtype: bool
+        """
+        with open(file_path, 'rb') as f:
+            data = f.read(1024) # read first 1k bytes
+        if not data:
+            return False
+        # Count the number of non-text characters (binary characters).
+        # Characters that are not in the ASCII range 32-126 are considered binary.
+        non_text_chars = sum(1 for b in data if b < 32 or b > 126)
+        # If more than 10% are non-text (binary) characters, then this is considered a binary file.
+        return non_text_chars / len(data) <= 0.1
+
+    def _upload_file(self, local_temp_file: str, cloned_entry_id: str) -> None:
+        """
+        Uploads a given local file to a KalturaDataEntry identified by its id
+
+        :param local_temp_file: The file path of the local file to upload
+        :type local_temp_file: str
+        :param cloned_entry_id: The id of the KalturaDataEntry to upload the file to
+        :type cloned_entry_id: str
+
+        :return: None
+        """
+        upload_token = self.dest_client.uploadToken.add()
+        with open(local_temp_file, 'rb') as temp_file:
+            upload_token = self.dest_client.uploadToken.upload(upload_token.id, temp_file)
+        file_upload_resource = KalturaUploadedFileTokenResource()
+        file_upload_resource.token = upload_token.id
+        self.dest_client.data.addContent(cloned_entry_id, file_upload_resource)
 
     def _iterate_and_clone_entry_assets(self, source_entry: KalturaBaseEntry, cloned_entry: KalturaBaseEntry) -> Dict[str, dict[str, str]]:
         """
@@ -804,14 +881,54 @@ class KalturaEntryContentAndAssetsCloner:
         # if it's an image entry - add the source image to the newly cloned entry
         entry_type = type(source_entry).__name__
         if entry_type == 'KalturaMediaEntry' and source_entry.mediaType.getValue() == KalturaMediaType.IMAGE:
-            ks = self.source_client.getKs().decode('utf-8') # we add a KS to the raw url to ensure there will be no issues pulling the image source
-            # to ensure this URL doesn't expire before the destination account manages to clone it, make sure the KS provided is long enough (few days)
-            image_url = f"https://cfvod.kaltura.com/p/{source_entry.partnerId}/sp/{source_entry.partnerId}00/raw/entry_id/{source_entry.id}/ks/{ks}"
+            image_url = self._get_raw_url(source_entry, self.source_client)
             url_resource = KalturaUrlResource()
             url_resource.url = image_url
             self.dest_client.media.updateContent(cloned_entry.id, url_resource)
-            self.logger.info(f'Updated image source URL for dest entry id {cloned_entry.id} to: {image_url}')
+            self.logger.info(f'Updated image contents for src: {source_entry.id} / dest: {cloned_entry.id} to: {image_url}')
 
+        if entry_type == 'KalturaDataEntry':
+            try:
+                source_data_serve_url = self._get_raw_url(source_entry, self.source_client)
+                data_content = requests.get(source_data_serve_url)
+                current_dir = os.path.dirname(os.path.abspath(inspect.getfile(inspect.currentframe())))
+                temp_dir = os.path.join(current_dir, 'temp')
+                os.makedirs(temp_dir, exist_ok=True)
+                local_temp_file = os.path.join(temp_dir, 'data_content_' + source_entry.id + '_' + source_entry.name)
+                with open(local_temp_file, 'wb') as f:  # Store the file temporarily
+                    f.write(data_content.content)
+                if self._is_text_file(local_temp_file):
+                    try:
+                        data_entry_with_content = KalturaDataEntry()
+                        with open(local_temp_file, 'r') as temp_file:  # Open the file in text mode
+                            data_entry_with_content.dataContent = temp_file.read()
+                        self.dest_client.data.update(cloned_entry.id, data_entry_with_content)
+                    except UnicodeDecodeError:
+                        # if the file isn't a text file after all, revert to file upload
+                        self._upload_file(local_temp_file, cloned_entry.id)
+                else:
+                    # attempt a file upload for binary files
+                    self._upload_file(local_temp_file, cloned_entry.id)
+                self.logger.info(f'Updated data contents for src: {source_entry.id} / dest: {cloned_entry.id} to: {source_data_serve_url}')
+                os.remove(local_temp_file)
+            except requests.exceptions.RequestException as e:
+                self.logger.critical(f'Failed to download data src: {source_entry.id} / dest: {cloned_entry.id} - {e}')
+            except IOError as e:
+                self.logger.critical(f'File operation failed src: {source_entry.id} / dest: {cloned_entry.id} - {e}')
+            except KalturaException as e:
+                self.logger.critical(f'Kaltura operation failed src: {source_entry.id} / dest: {cloned_entry.id} - {e}')
+            except Exception as e:
+                self.logger.critical(f'Unexpected error occurred src: {source_entry.id} / dest: {cloned_entry.id} - {e}')
+                raise
+            
+        if entry_type == 'KalturaDocumentEntry':
+            source_document_serve_url = self._get_raw_url(source_entry, self.source_client)
+            url_resource = KalturaUrlResource()
+            url_resource.url = source_document_serve_url
+            conversion_profile_id = self.conversion_profiles_mapping.get(source_entry.conversionProfileId, None)
+            self.dest_client.document.documents.updateContent(cloned_entry.id, url_resource, conversion_profile_id)
+            self.logger.info(f'Updated document contents for src: {source_entry.id} / dest: {cloned_entry.id} to: {source_document_serve_url}')
+        
         # Fetching and cloning attachment assets
         attachment_assets = self._fetch_assets(
             source_entry, 
@@ -833,25 +950,26 @@ class KalturaEntryContentAndAssetsCloner:
             )
             new_caption_assets = self._clone_entry_caption_assets(source_entry, cloned_entry, caption_assets.get('assets'))
             
-            # Fetching and cloning flavor assets (only accessible and ready assets)
-            flavor_assets_filter = KalturaFlavorAssetFilter()
-            flavor_assets_filter.statusEqual = KalturaFlavorAssetStatus.READY
-            flavor_assets = self._fetch_assets(
-                source_entry, 
-                self.source_client.flavorAsset, 
-                flavor_assets_filter, 
-                ['KalturaFlavorAsset', 'KalturaLiveAsset']
-            )
-            new_flavor_assets = self._clone_entry_assets(
-                source_entry=source_entry,
-                cloned_entry=cloned_entry,
-                entry_assets=flavor_assets.get('assets'),
-                src_client_service=self.source_client.flavorAsset,
-                dest_client_service=self.dest_client.flavorAsset,
-                asset_id_attr='flavorParamsId',
-                asset_type=KalturaFlavorAsset
-            )
-        
+            # if it's not a live stream entry, clone its flavorAssets
+            if entry_type not in ['KalturaLiveStreamAdminEntry', 'KalturaLiveStreamEntry']:
+                # Fetching and cloning flavor assets (only accessible and ready assets)
+                flavor_assets_filter = KalturaFlavorAssetFilter()
+                flavor_assets_filter.statusEqual = KalturaFlavorAssetStatus.READY
+                flavor_assets = self._fetch_assets(
+                    source_entry, 
+                    self.source_client.flavorAsset, 
+                    flavor_assets_filter, 
+                    ['KalturaFlavorAsset'] 
+                )
+                new_flavor_assets = self._clone_entry_assets(
+                    source_entry=source_entry,
+                    cloned_entry=cloned_entry,
+                    entry_assets=flavor_assets.get('assets'),
+                    src_client_service=self.source_client.flavorAsset,
+                    dest_client_service=self.dest_client.flavorAsset,
+                    asset_id_attr='flavorParamsId',
+                    asset_type=KalturaFlavorAsset
+                )
         
         # Fetching and cloning thumbnail assets
         thumb_assets = self._fetch_assets(
