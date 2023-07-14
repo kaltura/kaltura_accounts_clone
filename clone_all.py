@@ -103,6 +103,8 @@ class KalturaCloner:
         """
         class KalturaLogger(IKalturaLogger):
             def __init__(self):
+                with open('kaltura_log.txt', 'w') as f: # clear the contents of the log file before each run
+                    pass 
                 self.logger = create_custom_logger(logging.getLogger('kaltura_client'), 'kaltura_log.txt')
                 
             def log(self, msg):
