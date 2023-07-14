@@ -369,7 +369,7 @@ class KalturaEntryContentAndAssetsCloner:
             cloned_entry: KalturaBaseEntry = self.api_parser.clone_kaltura_obj(source_entry)
 
         cloned_entry.adminTags = source_entry.adminTags + ',' + source_entry.id  # we use adminTags to maintain mapping between destination to source (we don't use referenceId to avoid breaking mappings of other systems)
-        cloned_entry.creatorId = source_entry.creatorId  # TODO: handle mapping of user IDs in cases of externalId and hashed userId is used...
+        cloned_entry.creatorId = self.users_mapping.get(source_entry.creatorId, source_entry.creatorId)  # TODO: handle mapping of user IDs in cases of externalId and hashed userId is used...
         cloned_entry.categoriesIds = NotImplemented  # it will be filled later in the categoryEntry association
         cloned_entry.categories = NotImplemented  # it will be filled later in the categoryEntry association
         cloned_entry.thumbnailUrl = NotImplemented  # it will be filled later when we clone the flavors of the entry
