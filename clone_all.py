@@ -116,7 +116,7 @@ class KalturaCloner:
         if self.config['kaltura']['should_log']:
             config.setLogger(KalturaLogger())
             
-        client = KalturaClient(config)
+        client = KalturaClient(config, True)
         ks = client.generateSessionV2(
             config_data['partner_secret'], 
             self.config['kaltura']['kaltura_user_id'], 

@@ -2,16 +2,17 @@ import re
 import os
 import logging
 import inspect
+from numpy import source
 import requests
 from kaltura_utils import create_custom_logger, retry_on_exception
-from typing import Type, List, Dict, Union, Any
+from typing import Type, List, Dict, Union, Any, Deque
 import xml.etree.ElementTree as ET
 from collections import deque
 from KalturaClient import KalturaClient
 from KalturaClient.Plugins.Core import (
-    KalturaBaseEntry, KalturaBaseEntryFilter, KalturaFilterPager, KalturaEntryType,
+    KalturaBaseEntry, KalturaBaseEntryFilter, KalturaFilterPager, KalturaEntryType, KalturaEntryDisplayInSearchType, KalturaEntryModerationStatus,
     KalturaBaseEntryOrderBy, KalturaServiceBase, KalturaUserEntry, KalturaFlavorAsset, KalturaThumbAsset, KalturaFileAsset, 
-    KalturaFlavorAssetFilter, KalturaThumbAssetFilter, KalturaFileAssetFilter, KalturaFileAssetObjectType,
+    KalturaFlavorAssetFilter, KalturaThumbAssetFilter, KalturaFileAssetFilter, KalturaFileAssetObjectType, KalturaUploadToken,
     KalturaUserEntryFilter, KalturaCategoryEntryFilter, KalturaEntryStatus, KalturaAssetFilter, KalturaAsset,
     KalturaUrlResource, KalturaLanguage, KalturaFlavorAssetStatus, KalturaMediaType, KalturaLiveStreamAdminEntry,
     KalturaConversionProfile, KalturaFilter, KalturaCategoryEntry, KalturaMediaEntry, KalturaUploadedFileTokenResource, KalturaDataEntry
@@ -83,9 +84,25 @@ class KalturaEntryContentAndAssetsCloner:
             KalturaUserEntry: KalturaMetadataObjectType.USER_ENTRY,
             # Add other types of Kaltura objects here if needed...
         }
+        # TODO: make these lists configurable via input attributes in clone method
         # entry statuses to filter for (only clone entries with these statuses). 
-        # TODO: make this list configurable via input attributes in clone method
-        self.entry_statuses_to_clone = f'{KalturaEntryStatus.IMPORT},{KalturaEntryStatus.PENDING},{KalturaEntryStatus.PRECONVERT},{KalturaEntryStatus.READY},{KalturaEntryStatus.BLOCKED},{KalturaEntryStatus.MODERATE},{KalturaEntryStatus.NO_CONTENT}'
+        self.entry_statuses_to_clone = ",".join([KalturaEntryStatus.BLOCKED, KalturaEntryStatus.ERROR_CONVERTING, KalturaEntryStatus.ERROR_IMPORTING,
+                             KalturaEntryStatus.IMPORT, KalturaEntryStatus.ERROR_IMPORTING, KalturaEntryStatus.INFECTED, 
+                             KalturaEntryStatus.SCAN_FAILURE, KalturaEntryStatus.MODERATE, KalturaEntryStatus.READY,
+                             KalturaEntryStatus.NO_CONTENT, KalturaEntryStatus.PENDING])
+        # Sequence of types for the entries to be processed
+        # only exclude PLAYLIST which we will add in a different cloner
+        self.entry_type_sequence = [KalturaEntryType.AUTOMATIC, KalturaEntryType.MEDIA_CLIP, KalturaEntryType.EXTERNAL_MEDIA, 
+                               KalturaEntryType.DOCUMENT, KalturaEntryType.DATA, KalturaEntryType.LIVE_STREAM, KalturaEntryType.LIVE_CHANNEL]
+        self.entry_types_to_clone = ",".join(self.entry_type_sequence)
+        
+        self.display_in_search_to_clone = [KalturaEntryDisplayInSearchType.KALTURA_NETWORK, KalturaEntryDisplayInSearchType.NONE,
+                                           KalturaEntryDisplayInSearchType.PARTNER_ONLY, KalturaEntryDisplayInSearchType.SYSTEM, 
+                                           -2] # -2 is recycled
+        
+        self.moderation_status_in = ",".join([str(x) for x in [KalturaEntryModerationStatus.APPROVED, KalturaEntryModerationStatus.AUTO_APPROVED, KalturaEntryModerationStatus.DELETED,
+                                              KalturaEntryModerationStatus.PENDING_MODERATION, KalturaEntryModerationStatus.REJECTED, KalturaEntryModerationStatus.FLAGGED_FOR_REVIEW]])
+                
         self.logger = create_custom_logger(logging.getLogger(__name__))
 
     def clone_entries(self, access_control_mapping: dict, metadata_profiles_mapping: dict, flavor_and_thumb_params_mapping: dict,
@@ -149,60 +166,92 @@ class KalturaEntryContentAndAssetsCloner:
         # first clone any default template entry ids in conversion profiles
         self._clone_conversion_profiles_default_entry_ids()
 
-        # Sequence of types for the entries to be processed
-        entry_type_sequence = [KalturaEntryType.MEDIA_CLIP, KalturaEntryType.EXTERNAL_MEDIA, KalturaEntryType.DOCUMENT,
-                               KalturaEntryType.DATA, KalturaEntryType.LIVE_STREAM, KalturaEntryType.LIVE_CHANNEL]
-
         # A collection to store the last processed entry IDs, to be used in idNotIn filter
-        last_20_processed_entry_ids = deque(maxlen=20) 
+        last_20_processed_entry_ids: Deque[str] = deque(maxlen=20) 
         
-        for entry_type in entry_type_sequence:
-            # Set up a filter to fetch all entries
-            entry_filter = KalturaBaseEntryFilter()
-            entry_filter.typeEqual = entry_type
-            # entry_filter.idEqual = '0_da9awm2l' #uncomment to test specific entry ID for debugging 
-            entry_filter.orderBy = KalturaBaseEntryOrderBy.CREATED_AT_ASC
-            entry_filter.createdAtGreaterThanOrEqual = NotImplemented
-            entry_filter.statusIn = self.entry_statuses_to_clone
-            pager = KalturaFilterPager()
-            pager.pageSize = 500
-            pager.pageIndex = 1
-
-            # Fetch and clone entries page by page
-            while True:
-                try:
-                    source_entries = self._get_entries(entry_filter, pager)
-                except Exception as error:
-                    self.logger.critical(f"Error occurred while fetching entries: {error}", extra={'color': 'red'})
-                    break
-
-                if not source_entries:
-                    break
-
-                for source_entry in source_entries:
-                    # If the current entry's createdAt is larger than the filter's createdAtGreaterThanOrEqual,
-                    # reset the processed IDs list
-                    if entry_filter.createdAtGreaterThanOrEqual == NotImplemented:
-                        entry_filter.createdAtGreaterThanOrEqual = source_entry.createdAt
-                    if source_entry.createdAt >= entry_filter.createdAtGreaterThanOrEqual:
-                        last_20_processed_entry_ids.clear()
-
-                    if not source_entry.parentEntryId and (not source_entry.rootEntryId or source_entry.id == source_entry.rootEntryId):
-                        # if it's a parent or root entry - clone it with its children
-                        entries_cloned = self._clone_entry_and_child_entries(source_entry, skip_if_exist)
-                        # Update the processed entry IDs list
-                        last_20_processed_entry_ids.extend([entry.id for entry in entries_cloned])
-                    else:
-                        # if it's an entry that doesn't have parent or root
-                        cloned_entry = self._clone_entry(source_entry, skip_if_exist)
-                        self.entry_mapping[source_entry.id] = cloned_entry.id  # add to source-dest mapping
-                        self.logger.info(f"\u21B3 Cloned parent-less entry: {cloned_entry.id}")
-                        last_20_processed_entry_ids.append(source_entry.id)
-
-                # Update the minimum createdAt filter and the idNotIn filter for the next batch
-                entry_filter.createdAtGreaterThanOrEqual = source_entries[-1].createdAt
-                entry_filter.idNotIn = ','.join(last_20_processed_entry_ids)
+        source_entries_counter = 0
         
+        for display_in_search_type in self.display_in_search_to_clone:
+            for entry_type in self.entry_type_sequence:
+                # Set up a filter to fetch all entries
+                entry_filter = KalturaBaseEntryFilter()
+                entry_filter.typeEqual = entry_type
+                # entry_filter.idEqual = '0_zbebmzrq' #uncomment to test specific entry ID for debugging 
+                entry_filter.orderBy = KalturaBaseEntryOrderBy.CREATED_AT_ASC
+                entry_filter.createdAtGreaterThanOrEqual = NotImplemented
+                entry_filter.statusIn = self.entry_statuses_to_clone
+                entry_filter.displayInSearchEqual = display_in_search_type
+                entry_filter.moderationStatusIn = self.moderation_status_in
+                pager = KalturaFilterPager()
+                pager.pageSize = 500
+                pager.pageIndex = 1
+
+                # Fetch and clone entries page by page
+                while True:
+                    try:
+                        source_entries = self._get_entries(entry_filter, pager)
+                    except Exception as error:
+                        self.logger.critical(f"Error occurred while fetching entries: {error}", extra={'color': 'red'})
+                        break
+
+                    if not source_entries:
+                        break
+
+                    for source_entry in source_entries:
+                        source_entries_counter += 1
+                        # If the current entry's createdAt is larger than the filter's createdAtGreaterThanOrEqual,
+                        # reset the processed IDs list
+                        if entry_filter.createdAtGreaterThanOrEqual == NotImplemented:
+                            entry_filter.createdAtGreaterThanOrEqual = source_entry.createdAt
+                        if source_entry.createdAt >= entry_filter.createdAtGreaterThanOrEqual:
+                            last_20_processed_entry_ids.clear()
+                        
+                        # only clone parent/root entries at this level, _clone_entry_and_child_entries will also clone its children
+                        if ((not source_entry.parentEntryId) and 
+                            (not source_entry.rootEntryId or source_entry.id == source_entry.rootEntryId)):
+                            # if this entry has no parent/root or it's a parent or root entry on its own - clone it with all its children
+                            entries_cloned = self._clone_entry_and_child_entries(source_entry, skip_if_exist)
+                            if entries_cloned:
+                                cloned_entry_ids_str = ','.join([str(entry.id) for entry in entries_cloned[1:]])
+                                self.logger.info(f"{source_entries_counter}) Cloned source entry: {source_entry.id}, {type(source_entry).__name__} and all its {len(entries_cloned)-1} children {cloned_entry_ids_str}", extra={'color': 'cyan'})
+                                last_20_processed_entry_ids.extend([entry.id for entry in entries_cloned])
+                            else:
+                                self.logger.info(f"{source_entries_counter}) Skipped source entry: {source_entry.id}, {type(source_entry).__name__} - was already cloned to destination account", extra={'color': 'cyan'})
+                                last_20_processed_entry_ids.append(source_entry.id)
+                        else:
+                            try:
+                                parent_entry_list = []
+                                root_entry_list = []
+                                parent_filter = KalturaBaseEntryFilter()
+                                parent_filter.statusIn = self.entry_statuses_to_clone
+                                parent_filter.displayInSearchEqual = display_in_search_type
+                                parent_filter.moderationStatusIn = self.moderation_status_in
+                                if source_entry.parentEntryId:
+                                    parent_filter.idEqual = source_entry.parentEntryId
+                                    parent_entry_list = self.source_client.baseEntry.list(parent_filter, pager).objects
+                                elif source_entry.rootEntryId and source_entry.id != source_entry.rootEntryId:
+                                    parent_filter.idEqual = source_entry.rootEntryId
+                                    root_entry_list = self.source_client.baseEntry.list(parent_filter, pager).objects
+                                
+                                if len(parent_entry_list) == 0 and len(root_entry_list) == 0: # this is a child entry, but its parent or root were deleted
+                                    # clone this parent/root-less child entry
+                                    entries_cloned = self._clone_entry_and_child_entries(source_entry, skip_if_exist)
+                                    if entries_cloned:
+                                        cloned_entry_ids_str = ','.join([str(entry.id) for entry in entries_cloned[1:]])
+                                        self.logger.info(f"{source_entries_counter}) Cloned parent/root-less source entry: {source_entry.id}, {type(source_entry).__name__} and all its {len(entries_cloned)-1} children {cloned_entry_ids_str}", extra={'color': 'cyan'})
+                                        last_20_processed_entry_ids.extend([entry.id for entry in entries_cloned])
+                                    else:
+                                        self.logger.info(f"{source_entries_counter}) Skipped source entry: {source_entry.id}, {type(source_entry).__name__} - was already cloned to destination account", extra={'color': 'cyan'})
+                                        last_20_processed_entry_ids.append(source_entry.id)
+                            except Exception as error:
+                                self.logger.info(f"{source_entries_counter}) Skipped source entry: {source_entry.id}, {type(source_entry).__name__} since it is a child/clip of another entry, will be cloned with parent", extra={'color': 'cyan'})
+                                last_20_processed_entry_ids.append(source_entry.id)
+                        
+                    # Update the minimum createdAt filter and the idNotIn filter for the next batch
+                    last_entry = source_entries[-1]
+                    entry_filter.createdAtGreaterThanOrEqual = last_entry.createdAt
+                    entry_filter.idNotIn = ','.join(last_20_processed_entry_ids)
+            
         # clone the metadata items of all entries, for each entry mapping on self.entry_mapping
         # we perform this after cloning ALL entries, in case an entry has metadata that relates to other entryIds
         for source_entry_id, destination_entry_id in self.entry_mapping.items():
@@ -214,7 +263,7 @@ class KalturaEntryContentAndAssetsCloner:
             else:
                 self.logger.critical(f"could not find source {source_entry_id} / {source_entry} or dest {destination_entry_id} / {destination_entry} on metadata cloning loop", extra={'color': 'red'})
                 
-        self.logger.info(f'cloned {len(self.entry_mapping)} entries')
+        self.logger.info(f"Iterated {source_entries_counter} times on source entries, cloned {len(self.entry_mapping)} total source entries", extra={'color': 'cyan'})
         return {
                 "entries": self.entry_mapping,
                 "cuepoints": self.entry_cuepoints_mapping,
@@ -276,46 +325,63 @@ class KalturaEntryContentAndAssetsCloner:
 
         .. seealso:: _clone_entry, _iterate_entries_matching_filter
         """
-
+        # if we already cloned it, return None
         cloned_entry_id = self.entry_mapping.get(source_entry.id, None)
         if cloned_entry_id:
             return None
 
         self.logger.info(f"\u21B3 Iterating over all entry's children parent/root Id == {source_entry.id}", extra={'color': 'blue'})
 
-        # Fetch and clone all entries whose parent is the source entry
+        # Fetch and clone all entries whose parent is the source entry (use all displayInSearch types to make sure we don't miss hidden children)
         parent_filter = KalturaBaseEntryFilter()
-        parent_filter.statusIn = self.entry_statuses_to_clone
         parent_filter.parentEntryIdEqual = source_entry.id
-        entry_as_parent_children = self._iterate_entries_matching_filter(parent_filter)
+        parent_filter.statusIn = self.entry_statuses_to_clone
+        parent_filter.typeIn = self.entry_types_to_clone
+        parent_filter.moderationStatusIn = self.moderation_status_in
+        entry_as_parent_children = []
+        for display_in_search_type in self.display_in_search_to_clone:
+            parent_filter.displayInSearchEqual = display_in_search_type
+            child_entries = self._iterate_entries_matching_filter(parent_filter)
+            entry_as_parent_children.extend(child_entries)
 
-        # Fetch and clone all entries whose root is the source entry
+        # Fetch and clone all entries whose root is the source entry (use all displayInSearch types to make sure we don't miss hidden children)
         root_filter = KalturaBaseEntryFilter()
         root_filter.rootEntryIdEqual = source_entry.id
         root_filter.statusIn = self.entry_statuses_to_clone
-        entry_as_root_children = self._iterate_entries_matching_filter(root_filter)
-
+        root_filter.moderationStatusIn = self.moderation_status_in
+        root_filter.typeIn = self.entry_types_to_clone
+        entry_as_root_children = []
+        for display_in_search_type in self.display_in_search_to_clone:
+            root_filter.displayInSearchEqual = display_in_search_type
+            child_entries = self._iterate_entries_matching_filter(root_filter)
+            entry_as_root_children.extend(child_entries)
+        
+        cloned_src_entries = []
+        
         # clone the parent entry -
         parent_entry = self._clone_entry(source_entry, skip_if_exist)
-        cloned_src_entries = [source_entry]  # add it to the cloned source entries list
-        self.entry_mapping[source_entry.id] = parent_entry.id  # add to source-dest mapping
-        self.logger.info(f"\u21B3 Cloned parent entry: {parent_entry.id}")
+        if parent_entry:
+            cloned_src_entries = [source_entry]  # add it to the cloned source entries list
+            self.entry_mapping[source_entry.id] = parent_entry.id  # add to source-dest mapping
+            self.logger.info(f"\u21B3 Cloned parent entry: {parent_entry.id}")
 
         # clone all the children that have this entry as their parentId -
         for src_entry in entry_as_parent_children:
             parent_source_id = parent_entry.id
             cloned_entry = self._clone_entry(src_entry, skip_if_exist, parent_source_id=parent_source_id)
-            cloned_src_entries.append(src_entry)  # add it to the cloned source entries list
-            self.entry_mapping[src_entry.id] = cloned_entry.id  # add to source-dest mapping
-            self.logger.info(f"\u21B3\u2794 Cloned {cloned_entry.id} from parent {parent_entry.id}/ source: {source_entry.id}")
+            if cloned_entry:
+                cloned_src_entries.append(src_entry)  # add it to the cloned source entries list
+                self.entry_mapping[src_entry.id] = cloned_entry.id  # add to source-dest mapping
+                self.logger.info(f"\u21B3\u2794 Cloned {cloned_entry.id} from parent {parent_entry.id}/ source: {source_entry.id}")
 
         # clone all the children that have this entry as their rootId -
         for src_entry in entry_as_root_children:
             root_source_id = parent_entry.id
             cloned_entry = self._clone_entry(src_entry, skip_if_exist, root_source_id=root_source_id)
-            cloned_src_entries.append(src_entry)  # add it to the cloned source entries list
-            self.entry_mapping[src_entry.id] = cloned_entry.id  # add to source-dest mapping
-            self.logger.info(f"\u21B3\u2794 Cloned {cloned_entry.id} from root {parent_entry.id}/ source: {source_entry.id}")
+            if cloned_entry:
+                cloned_src_entries.append(src_entry)  # add it to the cloned source entries list
+                self.entry_mapping[src_entry.id] = cloned_entry.id  # add to source-dest mapping
+                self.logger.info(f"\u21B3\u2794 Cloned {cloned_entry.id} from root {parent_entry.id}/ source: {source_entry.id}")
 
         # return the list of source entries objects that were cloned
         return cloned_src_entries
@@ -344,6 +410,11 @@ class KalturaEntryContentAndAssetsCloner:
 
         .. seealso:: _clone_entry_and_assets
         """
+        # if we already cloned it, return None
+        cloned_entry_id = self.entry_mapping.get(source_entry.id, None)
+        if cloned_entry_id:
+            return None
+        
         cloned_entry_type = type(source_entry).__name__
         if cloned_entry_type in ['KalturaLiveStreamAdminEntry', 'KalturaLiveStreamEntry']:
             # reset important fields of live entries so that the destination Kaltura system will fill these details instead
@@ -370,6 +441,8 @@ class KalturaEntryContentAndAssetsCloner:
 
         cloned_entry.adminTags = source_entry.adminTags + ',' + source_entry.id  # we use adminTags to maintain mapping between destination to source (we don't use referenceId to avoid breaking mappings of other systems)
         cloned_entry.creatorId = self.users_mapping.get(source_entry.creatorId, source_entry.creatorId)  # TODO: handle mapping of user IDs in cases of externalId and hashed userId is used...
+        if hasattr(source_entry, 'userId') and source_entry.userId: # data entries have an attribute userId 
+            cloned_entry.userId = self.users_mapping.get(source_entry.userId, source_entry.userId)
         cloned_entry.categoriesIds = NotImplemented  # it will be filled later in the categoryEntry association
         cloned_entry.categories = NotImplemented  # it will be filled later in the categoryEntry association
         cloned_entry.thumbnailUrl = NotImplemented  # it will be filled later when we clone the flavors of the entry
@@ -378,8 +451,8 @@ class KalturaEntryContentAndAssetsCloner:
         cloned_entry.conversionProfileId = self.conversion_profiles_mapping.get(source_entry.conversionProfileId, NotImplemented)  # map source to dest / Conversion Profile
         cloned_entry.accessControlId = self.access_control_mapping.get(source_entry.accessControlId, NotImplemented)  # map source to dest / Access Control Profile
         cloned_entry.templateEntryId = self.entry_mapping.get(source_entry.templateEntryId, NotImplemented)  # map source to dest / transcoding template Entry Id
-        cloned_entry.rootEntryId = self.entry_mapping.get(source_entry.parentEntryId, NotImplemented)  # map source to dest / root entry id (clip scenarios)
-        cloned_entry.parentEntryId = self.entry_mapping.get(source_entry.rootEntryId, NotImplemented)  # map source to dest / parent entry id (parent-child relationship in mutli-stream or slides)
+        cloned_entry.rootEntryId = self.entry_mapping.get(source_entry.rootEntryId, NotImplemented)  # map source to dest / root entry id (clip scenarios)
+        cloned_entry.parentEntryId = self.entry_mapping.get(source_entry.parentEntryId, NotImplemented)  # map source to dest / parent entry id (parent-child relationship in mutli-stream or slides)
         cloned_entry.redirectEntryId = self.entry_mapping.get(source_entry.redirectEntryId, NotImplemented)  # map source to dest / redirect entry id (e.g. redirecting from live to recorded vod)
 
         if cloned_entry.parentEntryId is not NotImplemented and cloned_entry.parentEntryId != cloned_entry.id:
@@ -388,9 +461,15 @@ class KalturaEntryContentAndAssetsCloner:
             cloned_entry.accessControlId = NotImplemented
             cloned_entry.startDate = NotImplemented
             cloned_entry.endDate = NotImplemented
-            
+        
+        if cloned_entry_type == 'KalturaDataEntry':
+            cloned_entry.retrieveDataContentByGet = False
+        
+        cloned_entry.displayInSearch = source_entry.displayInSearch
+        
         dest_filter = KalturaBaseEntryFilter()
         dest_filter.statusIn = self.entry_statuses_to_clone
+        dest_filter.typeIn = self.entry_types_to_clone
         dest_filter.adminTagsLike = source_entry.id
         if parent_source_id is not None:
             dest_filter.parentEntryIdEqual = parent_source_id
@@ -448,29 +527,84 @@ class KalturaEntryContentAndAssetsCloner:
             pager = KalturaFilterPager()
             pager.pageIndex = 1
             pager.pageSize = 1
-            dest_entries = self._list_with_retry(client_service, dest_filter, pager).objects # see if there is an existing entry on the dest account
+            dest_entries = client_service.list(dest_filter, pager).objects # see if there is an existing entry on the dest account
             if len(dest_entries) > 0:  # the entry already exist, so let's return it and skip the rest
                 dest_entry = dest_entries[0]
                 self.logger.info(f"\u21B3 Skipped updating of {cloned_entry_type} destination: {dest_entry.id} source: {source_entry.id}")
                 return dest_entry # return the existing entry if skip_if_exist is True 
-                
-        cloned_entry = self._clone_kaltura_object(client_service, source_entry, cloned_entry, dest_filter, skip_if_exist)
         
-        # if the destination entry is not a quiz entry, let's check the source to make sure if it should or shouldn't be a quiz
-        if not hasattr(cloned_entry, 'capabilities') or not isinstance(cloned_entry.capabilities, str) or 'quiz.quiz' not in cloned_entry.capabilities:
-            quiz_filter = KalturaQuizFilter()
-            quiz_filter.entryIdEqual = source_entry.id
-            source_quizes = self.source_client.quiz.quiz.list(quiz_filter).objects
-            if len(source_quizes) > 0:
-                # this is a Quiz entry - let's clone the quiz part too
-                src_quiz = source_quizes[0]
-                cloned_quiz = self.api_parser.clone_kaltura_obj(src_quiz)
-                new_cloned_quiz = self.dest_client.quiz.quiz.add(cloned_entry.id, cloned_quiz)
-                self.logger.info(f"\u21B3\u2794 Cloned a new quiz entry src: {source_entry.id} / dest: {cloned_entry.id}")
+        if cloned_entry_type != 'KalturaDataEntry': # for all entry types:
+            # if it is NOT a data entry - clone it:
+            cloned_entry = self._clone_kaltura_object(client_service, source_entry, cloned_entry, dest_filter, skip_if_exist)
+            # if the destination entry is not a quiz entry, let's check the source to make sure if it should or shouldn't be a quiz
+            if not hasattr(cloned_entry, 'capabilities') or not isinstance(cloned_entry.capabilities, str) or 'quiz.quiz' not in cloned_entry.capabilities:
+                quiz_filter = KalturaQuizFilter()
+                quiz_filter.entryIdEqual = source_entry.id
+                source_quizes = self.source_client.quiz.quiz.list(quiz_filter).objects
+                if len(source_quizes) > 0:
+                    # this is a Quiz entry - let's clone the quiz part too
+                    src_quiz = source_quizes[0]
+                    cloned_quiz = self.api_parser.clone_kaltura_obj(src_quiz)
+                    new_cloned_quiz = self.dest_client.quiz.quiz.add(cloned_entry.id, cloned_quiz)
+                    self.logger.info(f"\u21B3\u2794 Cloned a new quiz entry src: {source_entry.id} / dest: {cloned_entry.id}")
 
-        # Iterate over all related sub-objects of the entry (attachments, captions, flavor assets, thumbnail assets, and file assets)
-        cloned_assets = self._iterate_and_clone_entry_assets(source_entry, cloned_entry)
-        cloned_thumb_assets = cloned_assets['thumbnails']
+            # Iterate over all related sub-objects of the entry (attachments, captions, flavor assets, thumbnail assets, and file assets)
+            cloned_assets = self._iterate_and_clone_entry_assets(source_entry, cloned_entry)
+            cloned_thumb_assets = cloned_assets['thumbnails']
+            
+            # clone all entry's cuepoints
+            cloned_cue_points = self._clone_cue_points(source_entry, cloned_entry, cloned_thumb_assets)
+            # clone the metadata items of all cloned cue points
+            for source_cuepoint_id, destination_cuepoint_id in cloned_cue_points.items():
+                source_cuepoint = self.source_client.cuePoint.cuePoint.get(source_cuepoint_id)
+                destination_cuepoint = self.dest_client.cuePoint.cuePoint.get(destination_cuepoint_id)
+                if source_cuepoint is not None and destination_cuepoint is not None:
+                    cloned_cuepoints_metadata_items = self._clone_object_metadata(source_cuepoint, destination_cuepoint)
+                    self.logger.info(f'cloned {len(cloned_cuepoints_metadata_items)} cuepoint metadata for entry src: {source_entry.id} / dest: {cloned_entry.id}')
+                else:
+                    self.logger.critical(f"Filed to clone metadata for userEntry src: {source_cuepoint_id}, dest: {destination_cuepoint_id} on entry src: {source_entry.id} / dest: {cloned_entry.id}", extra={'color': 'red'})
+
+            # Fetching and cloning timed thumbnail assets for cuepoints that have thumbnails (chapters/slides)
+            timed_thumb_assets = self._fetch_assets(
+                source_entry, 
+                self.source_client.thumbAsset, 
+                KalturaThumbAssetFilter(), 
+                ['KalturaTimedThumbAsset']
+            )
+            new_timed_thumb_assets = self._clone_entry_assets(
+                source_entry=source_entry,
+                cloned_entry=cloned_entry,
+                entry_assets=timed_thumb_assets.get('assets'),
+                src_client_service=self.source_client.thumbAsset,
+                dest_client_service=self.dest_client.thumbAsset,
+                asset_id_attr='thumbParamsId',
+                asset_type=KalturaTimedThumbAsset
+            )
+        else: # only for Data entries:
+            # For data entries, we have a different flow (must first upload the data file, then call addFromUploadedFile)
+            try:
+                source_data_serve_url = self._get_raw_url(source_entry, self.source_client)
+                data_content = requests.get(source_data_serve_url)
+                current_dir = os.path.dirname(os.path.abspath(inspect.getfile(inspect.currentframe())))
+                temp_dir = os.path.join(current_dir, 'temp')
+                os.makedirs(temp_dir, exist_ok=True)
+                file_name = 'data_content_' + source_entry.id + '_' + source_entry.name
+                local_temp_file = os.path.join(temp_dir, file_name)
+                with open(local_temp_file, 'wb') as f:  # Store the file temporarily
+                    f.write(data_content.content)
+                cloned_entry.type = KalturaEntryType.DATA
+                cloned_entry = self._upload_and_add_data(local_temp_file, file_name, cloned_entry)
+                self.logger.info(f'Updated data contents for src: {source_entry.id} / dest: {cloned_entry.id} to: {source_data_serve_url}')
+                os.remove(local_temp_file)
+            except requests.exceptions.RequestException as e:
+                self.logger.critical(f'Failed to download data src: {source_entry.id} / dest: {cloned_entry.id} - {e}')
+            except IOError as e:
+                self.logger.critical(f'File operation failed src: {source_entry.id} / dest: {cloned_entry.id} - {e}')
+            except KalturaException as e:
+                self.logger.critical(f'Kaltura operation failed src: {source_entry.id} / dest: {cloned_entry.id} - {e}')
+            except Exception as e:
+                self.logger.critical(f'Unexpected error occurred src: {source_entry.id} / dest: {cloned_entry.id} - {e}')
+                raise
         
         # clone user-entry associations
         cloned_entry_users = self._clone_entry_user_association(source_entry, cloned_entry)
@@ -487,65 +621,7 @@ class KalturaEntryContentAndAssetsCloner:
         # clone the category-user associations
         cloned_category_users = self._clone_entry_category_association(source_entry, cloned_entry)
         
-        # clone all entry's cuepoints
-        cloned_cue_points = self._clone_cue_points(source_entry, cloned_entry, cloned_thumb_assets)
-        # clone the metadata items of all cloned cue points
-        for source_cuepoint_id, destination_cuepoint_id in cloned_cue_points.items():
-            source_cuepoint = self.source_client.cuePoint.cuePoint.get(source_cuepoint_id)
-            destination_cuepoint = self.dest_client.cuePoint.cuePoint.get(destination_cuepoint_id)
-            if source_cuepoint is not None and destination_cuepoint is not None:
-                cloned_cuepoints_metadata_items = self._clone_object_metadata(source_cuepoint, destination_cuepoint)
-                self.logger.info(f'cloned {len(cloned_cuepoints_metadata_items)} cuepoint metadata for entry src: {source_entry.id} / dest: {cloned_entry.id}')
-            else:
-                self.logger.critical(f"Filed to clone metadata for userEntry src: {source_cuepoint_id}, dest: {destination_cuepoint_id} on entry src: {source_entry.id} / dest: {cloned_entry.id}", extra={'color': 'red'})
-
-        # Fetching and cloning timed thumbnail assets for cuepoints that have thumbnails (chapters/slides)
-        timed_thumb_assets = self._fetch_assets(
-            source_entry, 
-            self.source_client.thumbAsset, 
-            KalturaThumbAssetFilter(), 
-            ['KalturaTimedThumbAsset']
-        )
-        new_timed_thumb_assets = self._clone_entry_assets(
-            source_entry=source_entry,
-            cloned_entry=cloned_entry,
-            entry_assets=timed_thumb_assets.get('assets'),
-            src_client_service=self.source_client.thumbAsset,
-            dest_client_service=self.dest_client.thumbAsset,
-            asset_id_attr='thumbParamsId',
-            asset_type=KalturaTimedThumbAsset
-        )
-        
         return cloned_entry
-
-    @retry_on_exception(max_retries=5, delay=1, backoff=2, exceptions=(KalturaException, KalturaClientException))
-    def _list_with_retry(self, client_service: KalturaServiceBase, filter, pager=NotImplemented):
-        """
-        List objects from a Kaltura service with automatic retries in case of exceptions.
-
-        This function is designed to list items from a client service of Kaltura, 
-        with automatic retries upon encountering specified exceptions.
-
-        :param client_service: The client service from which items are to be listed.
-        :type client_service: Kaltura client service object
-        :param filter: The filter to be used while listing items.
-        :type filter: Kaltura filter object
-        :param pager: The pager to be used while listing items. It is optional and is not implemented by default.
-        :type pager: Kaltura pager object, optional
-
-        :return: The result of the client service's list method.
-        :rtype: Kaltura list response object
-
-        .. note::
-            This method uses a decorator, `retry_on_exception`, which automatically retries the method 
-            in case of `KalturaException` exceptions, up to a maximum of 5 attempts with an 
-            exponential backoff delay.
-
-        . seealso::
-            retry_on_exception: A method used to implement automatic retries on exceptions.
-        """
-        list_response = client_service.list(filter, pager)
-        return list_response
 
     def _clone_kaltura_object(self, client_service: KalturaServiceBase, source_object: KalturaObjectBase, cloned_object: KalturaObjectBase, filter_object: KalturaFilter, skip_if_exist:bool = False) -> Union[KalturaObjectBase, None]:
         """
@@ -571,16 +647,13 @@ class KalturaEntryContentAndAssetsCloner:
         .. note::
             This method assumes that self.source_client and self.dest_client have been initialized with the source and 
             destination Kaltura services respectively. 
-
-        .. seealso::
-            _list_with_retry: A method used for listing Kaltura objects with retries upon failure.
         """
 
         # check if this object was already cloned to the destination account
         pager = KalturaFilterPager()
         pager.pageIndex = 1
         pager.pageSize = 1
-        dest_objects = self._list_with_retry(client_service, filter_object, pager).objects
+        dest_objects = client_service.list(filter_object, pager).objects
         try:
             if len(dest_objects) > 0:  # Object exists, update it
                 dest_object = dest_objects[0]  # update cloned object to latest values of the source object
@@ -609,13 +682,6 @@ class KalturaEntryContentAndAssetsCloner:
         except KalturaException as error:
             self.logger.critical(f'\u21B3 Failed to clone/update object: {error}', extra={'color': 'red'})
             return None
-
-    def _retry_func(self, func, *args, **kwargs):
-        @retry_on_exception(max_retries=5, delay=1, backoff=2, exceptions=(KalturaException, KalturaClientException))
-        def func_with_retry():
-            return func(*args, **kwargs)
-
-        return func_with_retry()
 
     def _clone_entry_assets(self, source_entry: KalturaBaseEntry, cloned_entry: KalturaBaseEntry, entry_assets, src_client_service, dest_client_service, asset_id_attr, asset_type: Type[KalturaAsset]) -> List[KalturaAsset]:
         """
@@ -647,7 +713,6 @@ class KalturaEntryContentAndAssetsCloner:
 
         .. seealso::
             api_parser.clone_kaltura_obj: A method used for cloning Kaltura objects.
-            _list_with_retry: A method used for listing Kaltura objects with retry logic in case of failures.
         """
         cloned_assets = dict()
         if entry_assets and len(entry_assets) > 0 and source_entry and cloned_entry:
@@ -663,7 +728,7 @@ class KalturaEntryContentAndAssetsCloner:
                 pager.pageSize = 500
 
                 # Try to get the asset from the destination
-                dest_assets = self._list_with_retry(dest_client_service, filter, pager).objects
+                dest_assets = dest_client_service.list(filter, pager).objects
 
                 # Initiate a variable to hold the existence status of the source asset in the destination
                 asset_exists_in_dest = False
@@ -698,24 +763,26 @@ class KalturaEntryContentAndAssetsCloner:
                     
                     if asset_id_attr is not None:
                         setattr(cloned_asset, asset_id_attr, self.flavor_and_thumb_params_mapping.get(getattr(source_asset, asset_id_attr), NotImplemented))
-                    new_asset = dest_client_service.add(cloned_entry.id, cloned_asset)
-                    # get the asset URL from the source account
-                    asset_url = src_client_service.getUrl(source_asset.id)
-                    # create a KalturaUrlResource with the asset URL
-                    url_resource = KalturaUrlResource()
-                    url_resource.url = asset_url
-                    # add the URL resource to the new asset in the destination account
-                    # below uses retry to execute - dest_client_service.setContent(new_asset.id, url_resource)
-                    result = self._retry_func(dest_client_service.setContent, new_asset.id, url_resource)
-                    cloned_assets[source_asset.id] = new_asset.id
-                    if asset_type is KalturaThumbAsset:
-                        self.entry_thumb_assets_mapping[source_asset.id] = new_asset.id
-                        if 'default_thumb' in source_asset.tags: # if it is the default thumbnail, set it default on the destination
-                            dest_client_service.setAsDefault(new_asset.id)
-                    elif asset_type is KalturaFlavorAsset:
-                        self.entry_flavor_assets_mapping[source_asset.id] = new_asset.id
-                    self.logger.info(f"\u21B3 Created new {type(new_asset).__name__}: {new_asset.id}, for entry src: {source_entry.id} / dest: {cloned_entry.id}")
-
+                    try:
+                        new_asset = dest_client_service.add(cloned_entry.id, cloned_asset)
+                        # get the asset URL from the source account
+                        asset_url = src_client_service.getUrl(source_asset.id)
+                        # create a KalturaUrlResource with the asset URL
+                        url_resource = KalturaUrlResource()
+                        url_resource.url = asset_url
+                        # add the URL resource to the new asset in the destination account
+                        result = dest_client_service.setContent(new_asset.id, url_resource)
+                        cloned_assets[source_asset.id] = new_asset.id
+                        if asset_type is KalturaThumbAsset:
+                            self.entry_thumb_assets_mapping[source_asset.id] = new_asset.id
+                            if 'default_thumb' in source_asset.tags: # if it is the default thumbnail, set it default on the destination
+                                dest_client_service.setAsDefault(new_asset.id)
+                        elif asset_type is KalturaFlavorAsset:
+                            self.entry_flavor_assets_mapping[source_asset.id] = new_asset.id
+                        self.logger.info(f"\u21B3 Created new {type(new_asset).__name__}: {new_asset.id}, for entry src: {source_entry.id} / dest: {cloned_entry.id}")
+                    except KalturaException as error:
+                        self.logger.critical(f"Failed to clone asset for dest entry: {cloned_entry.id}, cloned asset: {cloned_asset}. With error: {error}", extra={'color': 'red'})
+                    
         return cloned_assets
 
     def _iterate_entries_matching_filter(self, entry_filter: KalturaBaseEntryFilter) -> List[KalturaBaseEntry]:
@@ -775,14 +842,11 @@ class KalturaEntryContentAndAssetsCloner:
         .. note::
             This method assumes that self.source_client and self.dest_client have been initialized with the source and 
             destination Kaltura services respectively.
-
-        .. seealso::
-            _list_with_retry: A method used for fetching a list of items from the Kaltura account with retries.
         """
         client = self.source_client if from_source else self.dest_client
         try:
-            result = self._list_with_retry(client.baseEntry, entry_filter, pager).objects
-            return result
+            result = client.baseEntry.list(entry_filter, pager)
+            return result.objects
         except KalturaException as error:
             client_name = "source" if from_source else "destination"
             self.logger.critical(f"Failed to fetch entries from {client_name}: {error}", extra={'color': 'red'})
@@ -827,23 +891,26 @@ class KalturaEntryContentAndAssetsCloner:
         # If more than 10% are non-text (binary) characters, then this is considered a binary file.
         return non_text_chars / len(data) <= 0.1
 
-    def _upload_file(self, local_temp_file: str, cloned_entry_id: str) -> None:
+    def _upload_and_add_data(self, local_temp_file: str, file_name: str, cloned_entry: KalturaDataEntry) -> None:
         """
         Uploads a given local file to a KalturaDataEntry identified by its id
 
         :param local_temp_file: The file path of the local file to upload
         :type local_temp_file: str
-        :param cloned_entry_id: The id of the KalturaDataEntry to upload the file to
-        :type cloned_entry_id: str
-
+        :param file_name: The file name to use in the upload token name
+        :type file_name: str
+        :param cloned_entry: The KalturaDataEntry to create and associate the file uploaded with
+        :type cloned_entry: KalturaDataEntry
+        
         :return: None
         """
-        upload_token = self.dest_client.uploadToken.add()
+        upload_token:KalturaUploadToken = KalturaUploadToken()
+        upload_token.fileName = file_name
+        upload_token = self.dest_client.uploadToken.add(upload_token)
         with open(local_temp_file, 'rb') as temp_file:
             upload_token = self.dest_client.uploadToken.upload(upload_token.id, temp_file)
-        file_upload_resource = KalturaUploadedFileTokenResource()
-        file_upload_resource.token = upload_token.id
-        self.dest_client.data.addContent(cloned_entry_id, file_upload_resource)
+        cloned_data_entry = self.dest_client.baseEntry.addFromUploadedFile(cloned_entry, upload_token.id, KalturaEntryType.DATA)
+        return cloned_data_entry
 
     def _iterate_and_clone_entry_assets(self, source_entry: KalturaBaseEntry, cloned_entry: KalturaBaseEntry) -> Dict[str, dict[str, str]]:
         """
@@ -886,41 +953,7 @@ class KalturaEntryContentAndAssetsCloner:
             url_resource.url = image_url
             self.dest_client.media.updateContent(cloned_entry.id, url_resource)
             self.logger.info(f'Updated image contents for src: {source_entry.id} / dest: {cloned_entry.id} to: {image_url}')
-
-        if entry_type == 'KalturaDataEntry':
-            try:
-                source_data_serve_url = self._get_raw_url(source_entry, self.source_client)
-                data_content = requests.get(source_data_serve_url)
-                current_dir = os.path.dirname(os.path.abspath(inspect.getfile(inspect.currentframe())))
-                temp_dir = os.path.join(current_dir, 'temp')
-                os.makedirs(temp_dir, exist_ok=True)
-                local_temp_file = os.path.join(temp_dir, 'data_content_' + source_entry.id + '_' + source_entry.name)
-                with open(local_temp_file, 'wb') as f:  # Store the file temporarily
-                    f.write(data_content.content)
-                if self._is_text_file(local_temp_file):
-                    try:
-                        data_entry_with_content = KalturaDataEntry()
-                        with open(local_temp_file, 'r') as temp_file:  # Open the file in text mode
-                            data_entry_with_content.dataContent = temp_file.read()
-                        self.dest_client.data.update(cloned_entry.id, data_entry_with_content)
-                    except UnicodeDecodeError:
-                        # if the file isn't a text file after all, revert to file upload
-                        self._upload_file(local_temp_file, cloned_entry.id)
-                else:
-                    # attempt a file upload for binary files
-                    self._upload_file(local_temp_file, cloned_entry.id)
-                self.logger.info(f'Updated data contents for src: {source_entry.id} / dest: {cloned_entry.id} to: {source_data_serve_url}')
-                os.remove(local_temp_file)
-            except requests.exceptions.RequestException as e:
-                self.logger.critical(f'Failed to download data src: {source_entry.id} / dest: {cloned_entry.id} - {e}')
-            except IOError as e:
-                self.logger.critical(f'File operation failed src: {source_entry.id} / dest: {cloned_entry.id} - {e}')
-            except KalturaException as e:
-                self.logger.critical(f'Kaltura operation failed src: {source_entry.id} / dest: {cloned_entry.id} - {e}')
-            except Exception as e:
-                self.logger.critical(f'Unexpected error occurred src: {source_entry.id} / dest: {cloned_entry.id} - {e}')
-                raise
-            
+    
         if entry_type == 'KalturaDocumentEntry':
             source_document_serve_url = self._get_raw_url(source_entry, self.source_client)
             url_resource = KalturaUrlResource()
@@ -1033,7 +1066,7 @@ class KalturaEntryContentAndAssetsCloner:
             Any exceptions while fetching assets are logged and the function immediately returns the current list of assets and metadata.
 
         .. seealso::
-            :func:`_list_with_retry`, :func:`_iterate_object_metadata`
+            :func:`_iterate_object_metadata`
         """
         if hasattr(asset_filter, 'entryIdEqual'):
             asset_filter.entryIdEqual = source_entry.id
@@ -1049,7 +1082,7 @@ class KalturaEntryContentAndAssetsCloner:
 
         while True:
             try:
-                assets_paged = self._list_with_retry(client_service, asset_filter, pager).objects
+                assets_paged = client_service.list(asset_filter, pager).objects
                 if not assets_paged:
                     break  # no more assets
 
@@ -1101,7 +1134,7 @@ class KalturaEntryContentAndAssetsCloner:
             If the thumbnail asset is successfully cloned, a log message is generated.
 
         .. seealso::
-            :func:`_list_with_retry`, :func:`clone_kaltura_obj`
+            :func:`clone_kaltura_obj`
         """
         cloned_assets = []
         if entry_thumb_assets and len(entry_thumb_assets) > 0 and source_entry and cloned_entry:
@@ -1115,7 +1148,7 @@ class KalturaEntryContentAndAssetsCloner:
                 pager.pageSize = 500
 
                 # Try to get the asset from the destination
-                dest_assets = self._list_with_retry(self.dest_client.thumbAsset, filter, pager).objects
+                dest_assets = self.dest_client.thumbAsset.list(filter, pager).objects
 
                 # If the asset exists in the destination, skip. Otherwise, add it.
                 if len(dest_assets) == 0:
@@ -1295,7 +1328,7 @@ class KalturaEntryContentAndAssetsCloner:
 
         while True:
             try:
-                result = self._list_with_retry(client_service, item_filter, pager).objects
+                result = client_service.list(item_filter, pager).objects
                 if not result:
                     break
 
@@ -1326,9 +1359,6 @@ class KalturaEntryContentAndAssetsCloner:
 
         .. note::
             If the object provided support custom metadata, this function will return None
-
-        .. seealso::
-            :func:`_list_with_retry`
         """
         # Define a metadata filter
         metadata_filter = KalturaMetadataFilter()
@@ -1346,7 +1376,7 @@ class KalturaEntryContentAndAssetsCloner:
         if metadata_object_type is not None:
             metadata_filter.metadataObjectTypeEqual = metadata_object_type
             metadata_filter.objectIdEqual = kaltura_object.id
-            metadata_objects = self._list_with_retry(self.source_client.metadata.metadata, metadata_filter, pager).objects
+            metadata_objects = self.source_client.metadata.metadata.list(metadata_filter, pager).objects
             for metadata in metadata_objects:
                 self.logger.info(f"\u21B3 Found metadata with id {metadata.id} for {type(kaltura_object).__name__}/{kaltura_object.id}")
             return metadata_objects
@@ -1393,7 +1423,7 @@ class KalturaEntryContentAndAssetsCloner:
                 updated_metadata_xml = self._map_entries_on_metadata_xml_idlist(source_metadata_item.xml)
 
                 # Try to get the metadata item from the destination
-                dest_metadata_items = self._list_with_retry(self.dest_client.metadata.metadata, metadata_filter).objects
+                dest_metadata_items = self.dest_client.metadata.metadata.list(metadata_filter).objects
 
                 # If the metadata item exists in the destination, update it. Otherwise, add it.
                 if len(dest_metadata_items) > 0:
@@ -1756,7 +1786,7 @@ class KalturaEntryContentAndAssetsCloner:
                 updated_metadata_xml = self._map_entries_on_metadata_xml_idlist(source_metadata_item.xml)
 
                 # Try to get the metadata item from the destination
-                dest_metadata_items = self._list_with_retry(self.dest_client.metadata.metadata, metadata_filter).objects
+                dest_metadata_items = self.dest_client.metadata.metadata.list(metadata_filter).objects
 
                 # If the metadata item exists in the destination, update it. Otherwise, add it.
                 if len(dest_metadata_items) > 0:
