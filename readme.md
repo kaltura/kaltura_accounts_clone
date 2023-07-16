@@ -4,6 +4,10 @@ This Python-based project provides a suite of tools to clone various objects and
 This can be especially useful in scenarios such as setting up a new Kaltura account to mimic an existing one, synchronizing settings between multiple accounts, or migrating from one account to another.
 Each class can be used individually to clone specific Kaltura Object types, or as single entrypoint to clone an entire account and all its objects and configs.
 
+## Important Note
+
+This script assumes the use of a patched python client library to resolve utf8 encoding issues and support API requests retries (to circumvent temp network issues)
+See: [UTF-8 and Request Retries Python Client Pull-Request](https://github.com/kaltura/clients-generator/pull/943)
 ## Features
 
 The Kaltura Account Cloner can clone the following items:
@@ -124,8 +128,8 @@ List of pending tasks or improvements:
 - [x] Add error handling and logging
 - [x] Call thumbnail set as default action if source thumbAsset was default
 - [x] Verify cloning of document objects and their associations
+- [x] Verify cloning of data objects and their associations
 - [ ] Verify cloning of fileAsset objects and their associations
-- [ ] Verify cloning of data objects and their associations
 - [ ] Implement support for Player uiConf cloning
 - [ ] Implement support for Playlists cloning
 - [ ] Implement support for KalturaPath interactive videos cloning
