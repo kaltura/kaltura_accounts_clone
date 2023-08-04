@@ -130,6 +130,8 @@ List of pending tasks or improvements:
 - [x] Verify cloning of document objects and their associations
 - [x] Verify cloning of data objects and their associations
 - [ ] Verify cloning of fileAsset objects and their associations
+- [ ] Migrate entry Likes: using ADMIN KS, loop until no results, KalturaLikeFilter, filter.entryIdEqual = ENTRY_ID, client.like.list(filter) - then USING SPECIFIC USER KS of result.userId call: client.like.like(entryId)
+- [ ] Refactor categoryEntry to respect status - Upon calling categoryUser.add, check the status field value. If status==active, Admin KS is ok, if status==pending, need to switch KS to use a USER type KS that is tied to the particular categoryEntry.creatorUserId, if status==rejected need to call categoryEntry.reject after categoryEntry.add, and if status==deleted, not migrate it.
 - [ ] Implement support for Player uiConf cloning
 - [ ] Implement support for Playlists cloning
 - [ ] Implement support for KalturaPath interactive videos cloning
