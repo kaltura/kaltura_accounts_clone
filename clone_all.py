@@ -44,7 +44,7 @@ class KalturaCloner:
             **{key: process_dict(self.cached_data.get(key)) for key in keys_no_convert},
         }
         self.clients_manager = KalturaClientsManager(self.config['kaltura']['should_log'], 
-                                                     self.config['kaltura_user_id'], 
+                                                     self.config['kaltura']['kaltura_user_id'], 
                                                      self.config['kaltura']['session_duration'], 
                                                      self.config['kaltura']['session_privileges'], 
                                                      self.config['source'], 
