@@ -43,7 +43,12 @@ class KalturaCloner:
             **{key: process_dict(self.cached_data.get(key), True) for key in keys_to_convert},
             **{key: process_dict(self.cached_data.get(key)) for key in keys_no_convert},
         }
-        self.clients_manager = KalturaClientsManager(self.config['source'], self.config['destination'])
+        self.clients_manager = KalturaClientsManager(self.config['kaltura']['should_log'], 
+                                                     self.config['kaltura_user_id'], 
+                                                     self.config['kaltura']['session_duration'], 
+                                                     self.config['kaltura']['session_privileges'], 
+                                                     self.config['source'], 
+                                                     self.config['destination'])
         self.source_client = self.clients_manager.source_client
         self.dest_client = self.clients_manager.dest_client
         # tasks to clone
