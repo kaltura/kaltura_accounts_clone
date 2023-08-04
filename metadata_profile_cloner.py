@@ -1,5 +1,5 @@
 import logging
-from kaltura_utils import create_custom_logger
+from kaltura_utils import KalturaClientsManager, create_custom_logger
 from KalturaClient import KalturaClient
 from KalturaClient.Plugins.Metadata import (
     KalturaMetadataProfile, KalturaMetadataProfileFilter,
@@ -15,7 +15,7 @@ class MetadataProfileCloner:
     The constructor takes two arguments, the source client and the destination client, which are used to fetch 
     and clone the metadata profiles, respectively.
     """
-    def __init__(self, source_client:KalturaClient, dest_client:KalturaClient):
+    def __init__(self, clients_manager:KalturaClientsManager):
         """
         Construct a new MetadataProfileCloner.
 
@@ -24,8 +24,9 @@ class MetadataProfileCloner:
         :param dest_client: The destination client to which to clone metadata profiles.
         :type dest_client: KalturaClient
         """
-        self.source_client = source_client
-        self.dest_client = dest_client
+        self.clients_manager = clients_manager
+        self.source_client = self.clients_manager.source_client
+        self.dest_client =self.clients_manager.dest_client
         self.logger = create_custom_logger(logging.getLogger(__name__))
 
     def clone_metadata_profiles(self) -> dict:

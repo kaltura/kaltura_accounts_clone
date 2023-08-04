@@ -1,5 +1,5 @@
 import logging
-from kaltura_utils import create_custom_logger
+from kaltura_utils import KalturaClientsManager, create_custom_logger
 from KalturaClient import KalturaClient
 from KalturaClient.Plugins.Core import KalturaPartner
 from KalturaClient.exceptions import KalturaException
@@ -12,7 +12,7 @@ class KalturaPartnerCloner:
     This class uses the Kaltura API to clone partner accounts, including their configurations, 
     from a source Kaltura client to a destination Kaltura client.
     """
-    def __init__(self, source_client: KalturaClient, dest_client: KalturaClient):
+    def __init__(self, clients_manager:KalturaClientsManager):
         """
         Initialize a new instance of the KalturaPartnerCloner class.
 
@@ -21,8 +21,9 @@ class KalturaPartnerCloner:
         :param dest_client: The Kaltura client to which the partner accounts should be cloned.
         :type dest_client: KalturaClient
         """
-        self.source_client = source_client
-        self.dest_client = dest_client
+        self.clients_manager = clients_manager
+        self.source_client = self.clients_manager.source_client
+        self.dest_client =self.clients_manager.dest_client
         self.api_parser = KalturaApiSchemaParser()
         self.logger = create_custom_logger(logging.getLogger(__name__))
 

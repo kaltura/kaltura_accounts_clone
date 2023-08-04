@@ -1,5 +1,5 @@
 import logging
-from kaltura_utils import create_custom_logger
+from kaltura_utils import KalturaClientsManager, create_custom_logger
 from typing import Dict, List
 from KalturaClient import KalturaClient
 from KalturaClient.Plugins.Core import (
@@ -21,7 +21,7 @@ class KalturaUserCloner:
         dest_client (KalturaClient): The destination client to which to clone users.
         api_parser (KalturaApiSchemaParser): Parser for handling Kaltura objects and their schemas.
     """
-    def __init__(self, source_client: KalturaClient, dest_client: KalturaClient):
+    def __init__(self, clients_manager:KalturaClientsManager):
         """
         The constructor for the KalturaUserCloner class.
         
@@ -30,8 +30,9 @@ class KalturaUserCloner:
         :param dest_client: The destination client to which to clone users.
         :type dest_client: KalturaClient
         """
-        self.source_client = source_client
-        self.dest_client = dest_client
+        self.clients_manager = clients_manager
+        self.source_client = self.clients_manager.source_client
+        self.dest_client =self.clients_manager.dest_client
         self.api_parser = KalturaApiSchemaParser()
         self.logger = create_custom_logger(logging.getLogger(__name__))
 

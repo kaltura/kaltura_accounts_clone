@@ -3,7 +3,7 @@ import os
 import traceback
 import logging
 from pathlib import Path
-from kaltura_utils import create_custom_logger
+from kaltura_utils import create_custom_logger, KalturaClientsManager
 from KalturaClient import KalturaClient
 from KalturaClient.Base import IKalturaLogger, KalturaConfiguration
 from KalturaClient.Plugins.Core import KalturaSessionType
@@ -43,8 +43,9 @@ class KalturaCloner:
             **{key: process_dict(self.cached_data.get(key), True) for key in keys_to_convert},
             **{key: process_dict(self.cached_data.get(key)) for key in keys_no_convert},
         }
-        self.source_client = self.get_kaltura_client('source')
-        self.dest_client = self.get_kaltura_client('destination')
+        self.clients_manager = KalturaClientsManager(self.config['source'], self.config['destination'])
+        self.source_client = self.clients_manager.source_client
+        self.dest_client = self.clients_manager.dest_client
         # tasks to clone
         # add all the tasks you want to clone here
         # each task is a dictionary with the following keys: 'key', 'class', 'method', 'args', 'depends_on'
@@ -93,41 +94,6 @@ class KalturaCloner:
                     return None
         return None
 
-    def get_kaltura_client(self, config_key):
-        """
-        Get a Kaltura client instance.
-
-        :param config_key: The configuration key for the Kaltura client instance.
-
-        :return: Kaltura client instance.
-        """
-        class KalturaLogger(IKalturaLogger):
-            def __init__(self):
-                with open('kaltura_log.txt', 'w') as f: # clear the contents of the log file before each run
-                    pass 
-                self.logger = create_custom_logger(logging.getLogger('kaltura_client'), 'kaltura_log.txt')
-                
-            def log(self, msg):
-                self.logger.info(msg)
-                
-        config_data = self.config[config_key]
-        config = KalturaConfiguration()
-        config.serviceUrl = config_data['service_url']
-        if self.config['kaltura']['should_log']:
-            config.setLogger(KalturaLogger())
-            
-        client = KalturaClient(config, True)
-        ks = client.generateSessionV2(
-            config_data['partner_secret'], 
-            self.config['kaltura']['kaltura_user_id'], 
-            KalturaSessionType.ADMIN, 
-            config_data['partner_id'], 
-            self.config['kaltura']['session_duration'], 
-            self.config['kaltura']['session_privileges']
-        )
-        client.setKs(ks) # type: ignore
-        return client
-
     def execute_cloning(self, cloner_class, method, *args):
         """
         Execute the cloning process.
@@ -139,7 +105,7 @@ class KalturaCloner:
         :return: A dictionary containing the results or None if an error occurs.
         """
         self.logger.info(f"\nexecuting: {method}", extra={'color': 'yellow'})
-        cloner = cloner_class(self.source_client, self.dest_client)
+        cloner = cloner_class(self.clients_manager)
         try:
             result = getattr(cloner, method)(*args)
             self.logger.info(f"cloned: {method}, result: {result}")

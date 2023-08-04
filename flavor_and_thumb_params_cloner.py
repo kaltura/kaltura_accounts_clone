@@ -1,5 +1,5 @@
 import logging
-from kaltura_utils import create_custom_logger
+from kaltura_utils import KalturaClientsManager, create_custom_logger
 from KalturaClient import KalturaClient
 from KalturaClient.Plugins.Core import KalturaFilterPager
 from KalturaClient.Plugins.Core import KalturaFlavorParamsFilter, KalturaThumbParamsFilter
@@ -15,7 +15,7 @@ class FlavorAndThumbParamsCloner:
     KalturaApiSchemaParser to clone Kaltura objects.
     """
     
-    def __init__(self, source_client: KalturaClient, dest_client: KalturaClient):
+    def __init__(self, clients_manager:KalturaClientsManager):
         """
         Initialize a new instance of the FlavorAndThumbParamsCloner class.
 
@@ -25,8 +25,9 @@ class FlavorAndThumbParamsCloner:
         :param dest_client: The destination Kaltura client.
         :type dest_client: KalturaClient
         """
-        self.source_client = source_client
-        self.dest_client = dest_client
+        self.clients_manager = clients_manager
+        self.source_client = self.clients_manager.source_client
+        self.dest_client =self.clients_manager.dest_client
         self.api_parser = KalturaApiSchemaParser()
         self.logger = create_custom_logger(logging.getLogger(__name__))
 

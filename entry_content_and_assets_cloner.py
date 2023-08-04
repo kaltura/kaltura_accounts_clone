@@ -4,7 +4,7 @@ import logging
 import inspect
 from numpy import source
 import requests
-from kaltura_utils import create_custom_logger, retry_on_exception
+from kaltura_utils import KalturaClientsManager, create_custom_logger, retry_on_exception
 from typing import Type, List, Dict, Union, Any, Deque
 import xml.etree.ElementTree as ET
 from collections import deque
@@ -15,8 +15,9 @@ from KalturaClient.Plugins.Core import (
     KalturaFlavorAssetFilter, KalturaThumbAssetFilter, KalturaFileAssetFilter, KalturaFileAssetObjectType, KalturaUploadToken,
     KalturaUserEntryFilter, KalturaCategoryEntryFilter, KalturaEntryStatus, KalturaAssetFilter, KalturaAsset,
     KalturaUrlResource, KalturaLanguage, KalturaFlavorAssetStatus, KalturaMediaType, KalturaLiveStreamAdminEntry,
-    KalturaConversionProfile, KalturaFilter, KalturaCategoryEntry, KalturaMediaEntry, KalturaUploadedFileTokenResource, KalturaDataEntry
+    KalturaConversionProfile, KalturaFilter, KalturaCategoryEntry, KalturaMediaEntry, KalturaCategoryEntryStatus, KalturaDataEntry
 )
+from KalturaClient.Plugins.Like import KalturaLikeFilter
 from KalturaClient.Plugins.Document import KalturaDocumentEntry
 from KalturaClient.Plugins.Attachment import KalturaAttachmentAsset, KalturaAttachmentAssetFilter
 from KalturaClient.Plugins.Caption import KalturaCaptionAsset, KalturaCaptionAssetFilter
@@ -45,7 +46,7 @@ class KalturaEntryContentAndAssetsCloner:
         with the required source and destination service details, and that all previous mappings were created (acl, conversion profiles, flavor params, etc.)
     """
 
-    def __init__(self, source_client: KalturaClient, dest_client: KalturaClient):
+    def __init__(self, clients_manager:KalturaClientsManager):
         """
         Initializes the Kaltura cloning class.
 
@@ -61,8 +62,9 @@ class KalturaEntryContentAndAssetsCloner:
             The object_type_metadata_mapping is a dictionary mapping Kaltura objects to their corresponding metadata object types.
             The logger is used for logging information and errors.
         """
-        self.source_client = source_client
-        self.dest_client = dest_client
+        self.clients_manager = clients_manager
+        self.source_client = self.clients_manager.source_client
+        self.dest_client =self.clients_manager.dest_client
         self.entry_mapping = {} # holds all cloned entries and their source ids
         self.entry_flavor_assets_mapping = {} # holds all cloned flavorAssets of the entries and their source ids
         self.entry_thumb_assets_mapping = {} # holds all cloned thumbAssets of the entries and their source ids
@@ -620,6 +622,9 @@ class KalturaEntryContentAndAssetsCloner:
         
         # clone the category-user associations
         cloned_category_users = self._clone_entry_category_association(source_entry, cloned_entry)
+        
+        # Migrate likes
+        self._migrate_entry_likes(source_entry, cloned_entry)
         
         return cloned_entry
 
@@ -1652,15 +1657,33 @@ class KalturaEntryContentAndAssetsCloner:
             if len(category_entry_list) == 0:
                 # Try to add the new association to the destination client and save the returned object
                 try:
-                    new_association:KalturaCategoryEntry = self.dest_client.categoryEntry.add(cloned_association)
+                    new_association:KalturaCategoryEntry = None
+                    # Handle different statuses
+                    if source_association.status == KalturaCategoryEntryStatus.ACTIVE:
+                        # Use admin KS to add the categoryEntry
+                        new_association = self.dest_client.categoryEntry.add(cloned_association)
+                    elif source_association.status == KalturaCategoryEntryStatus.PENDING:
+                        # Switch to a user KS tied to categoryEntry.creatorUserId
+                        user_client = self.clients_manager.get_dest_client_with_user_session(source_association.creatorUserId, 180)
+                        new_association = user_client.categoryEntry.add(cloned_association)
+                    elif source_association.status == KalturaCategoryEntryStatus.REJECTED:
+                        # Call categoryEntry.reject after categoryEntry.add
+                        user_client = self.clients_manager.get_dest_client_with_user_session(source_association.creatorUserId, 180)
+                        new_association = user_client.categoryEntry.add(cloned_association)
+                        self.dest_client.categoryEntry.reject(new_association.id)
+                    elif source_association.status == KalturaCategoryEntryStatus.DELETED:
+                        # Do not migrate it
+                        continue
+                    else:
+                        self.logger.warning(f"Unknown status for source categoryEntry {source_association.id}. Skipping.", extra={'color': 'magenta'})
                     # since categoryEntry obj doesn't have an ID attribute, we combine categoryId + userId into a unqiue id
                     self.logger.info(f"Cloned category-entry {new_association.categoryId} for entry src:  {source_association.entryId} / dest: {new_association.entryId}")
                 except Exception as error:
                     self.logger.critical(f"Failed to clone category-entry association for entry {source_association.entryId}. Error: {str(error)}", extra={'color': 'red'})
-            else:
-                category_entry_src_id = str(source_association.categoryId) + '||' + source_association.entryId
-                category_entry_dest_id = str(cloned_association.categoryId) + '||' + cloned_association.entryId
-                cloned_association_ids[category_entry_src_id] = category_entry_dest_id
+            
+            category_entry_src_id = str() + '||' + source_association.entryId
+            category_entry_dest_id = str(cloned_association.categoryId) + '||' + cloned_association.entryId
+            cloned_association_ids[category_entry_src_id] = category_entry_dest_id
         # Return the list of cloned associations
         return cloned_association_ids
 
@@ -1803,3 +1826,23 @@ class KalturaEntryContentAndAssetsCloner:
             self.logger.info(f"\u21B3 No metadata items found on source object {source_object.id}")
 
         return object_metadata
+
+    def _migrate_entry_likes(self, source_entry: KalturaBaseEntry, cloned_entry: KalturaBaseEntry):
+        """
+        Migrate the likes from the source entry to the cloned entry.
+
+        :param source_entry: The source entry.
+        :param cloned_entry: The cloned entry.
+        """
+        # Create the like filter
+        like_filter = KalturaLikeFilter()
+        like_filter.entryIdEqual = source_entry.id
+
+        # Fetch all the likes for the source entry
+        source_likes = self.source_client.like.list(like_filter)
+
+        # Loop through the source likes
+        for source_like in source_likes.objects:
+            # Use the user KS of result.userId and call client.like.like(entryId)
+            user_client = self.clients_manager.get_dest_client_with_user_session(source_like.userId, 180)
+            user_client.like.like(cloned_entry.id)

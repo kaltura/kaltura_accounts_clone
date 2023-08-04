@@ -1,5 +1,5 @@
 import logging
-from kaltura_utils import create_custom_logger, retry_on_exception
+from kaltura_utils import KalturaClientsManager, create_custom_logger, retry_on_exception
 from typing import Dict, List
 from KalturaClient import KalturaClient
 from KalturaClient.Plugins.Core import (KalturaCategory, KalturaCategoryFilter, KalturaCategoryOrderBy, KalturaCategoryUser, 
@@ -18,9 +18,10 @@ class KalturaCategoryCloner:
     :param dest_client: The destination Kaltura client where the Categories will be cloned to.
     :type dest_client: KalturaClient
     """
-    def __init__(self, source_client: KalturaClient, dest_client: KalturaClient):
-        self.source_client = source_client
-        self.dest_client = dest_client
+    def __init__(self, clients_manager:KalturaClientsManager):
+        self.clients_manager = clients_manager
+        self.source_client = self.clients_manager.source_client
+        self.dest_client =self.clients_manager.dest_client
         self.category_mapping = {}
         self.api_parser = KalturaApiSchemaParser()
         self.logger = create_custom_logger(logging.getLogger(__name__))
