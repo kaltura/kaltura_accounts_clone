@@ -96,6 +96,11 @@ def retry_on_exception(max_retries=3, delay=1, backoff=2, exceptions=(Exception,
     return decorator
 
 class KalturaClientsManager:
+    source_client = None
+    dest_client = None
+    _source_user_client = None
+    _dest_user_client = None
+        
     def __init__(self, should_log, kaltura_user_id, session_duration, session_privileges, source_client_params, dest_client_params):
         self.source_client_params = source_client_params
         self.default_session_duration = session_duration
@@ -103,8 +108,14 @@ class KalturaClientsManager:
         self.source_client = self.get_kaltura_client(should_log, KalturaSessionType.ADMIN, kaltura_user_id,
                                 self.source_client_params['service_url'], self.source_client_params['partner_id'], self.source_client_params['partner_secret'],
                                 self.default_session_duration, self.default_session_privileges)
+        self._source_user_client = self.get_kaltura_client(should_log, KalturaSessionType.USER, kaltura_user_id,
+                                self.source_client_params['service_url'], self.source_client_params['partner_id'], self.source_client_params['partner_secret'],
+                                self.default_session_duration, self.default_session_privileges)
         self.dest_client_params = dest_client_params
         self.dest_client = self.get_kaltura_client(should_log, KalturaSessionType.ADMIN, kaltura_user_id,
+                                self.dest_client_params['service_url'], self.dest_client_params['partner_id'], self.dest_client_params['partner_secret'],
+                                self.default_session_duration, self.default_session_privileges)
+        self._dest_user_client = self.get_kaltura_client(should_log, KalturaSessionType.USER, kaltura_user_id,
                                 self.dest_client_params['service_url'], self.dest_client_params['partner_id'], self.dest_client_params['partner_secret'],
                                 self.default_session_duration, self.default_session_privileges)
         
@@ -122,7 +133,7 @@ class KalturaClientsManager:
             session_duration = self.default_session_duration
         if session_privileges is None:
             session_privileges = self.default_session_privileges
-        client = self.set_kaltura_client_ks(self.source_client, KalturaSessionType.USER, user_id, self.source_client_params['partner_id'], self.source_client_params['partner_secret'], session_duration, session_privileges)
+        client = self.set_kaltura_client_ks(self._source_user_client, KalturaSessionType.USER, user_id, self.source_client_params['partner_id'], self.source_client_params['partner_secret'], session_duration, session_privileges)
         return client
     
     def get_dest_client_with_user_session(self, user_id, session_duration:int = None, session_privileges:str = None)->KalturaClient:
@@ -139,10 +150,10 @@ class KalturaClientsManager:
             session_duration = self.default_session_duration
         if session_privileges is None:
             session_privileges = self.default_session_privileges
-        client = self.set_kaltura_client_ks(self.dest_client, KalturaSessionType.USER, user_id, self.dest_client_params['partner_id'], self.dest_client_params['partner_secret'], session_duration, session_privileges)
+        client = self.set_kaltura_client_ks(self._dest_user_client, KalturaSessionType.USER, user_id, self.dest_client_params['partner_id'], self.dest_client_params['partner_secret'], session_duration, session_privileges)
         return client
         
-    def set_kaltura_client_ks(self, client:KalturaClient, type:KalturaSessionType, user_id:str, partner_id:int, partner_secret:str, session_duration:int, session_privileges:str)-> KalturaClient:
+    def set_kaltura_client_ks(self, client:KalturaClient, type:int, user_id:str, partner_id:int, partner_secret:str, session_duration:int, session_privileges:str)-> KalturaClient:
         """
         Sets a new KS on Kaltura client instance instantiated with a valid Kaltura Session.
 
@@ -167,7 +178,7 @@ class KalturaClientsManager:
         client.setKs(ks) # type: ignore
         return client
     
-    def get_kaltura_client(self, should_log:bool, type:KalturaSessionType, user_id:str, service_url:str, partner_id:int, partner_secret:str, session_duration:int, session_privileges:str)-> KalturaClient:
+    def get_kaltura_client(self, should_log:bool, type:int, user_id:str, service_url:str, partner_id:int, partner_secret:str, session_duration:int, session_privileges:str)-> KalturaClient:
         """
         Get a Kaltura client instance instantiated with a valid Kaltura Session.
 

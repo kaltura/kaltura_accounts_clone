@@ -1664,13 +1664,14 @@ class KalturaEntryContentAndAssetsCloner:
                         # Use admin KS to add the categoryEntry
                         new_association = self.dest_client.categoryEntry.add(cloned_association)
                     elif source_status == KalturaCategoryEntryStatus.PENDING:
-                        # Switch to a user KS tied to categoryEntry.creatorUserId
-                        user_client = self.clients_manager.get_dest_client_with_user_session(source_association.creatorUserId, 180)
+                        # Switch to a user KS tied to categoryEntry.creatorUserId and entitlements enabled privilege
+                        user_client = self.clients_manager.get_dest_client_with_user_session(source_association.creatorUserId, 180, 'enableentitlement')
                         new_association = user_client.categoryEntry.add(cloned_association)
                     elif source_status == KalturaCategoryEntryStatus.REJECTED:
-                        # Call categoryEntry.reject after categoryEntry.add
-                        user_client = self.clients_manager.get_dest_client_with_user_session(source_association.creatorUserId, 180)
+                        # Switch to a user KS tied to categoryEntry.creatorUserId and entitlements enabled privilege
+                        user_client = self.clients_manager.get_dest_client_with_user_session(source_association.creatorUserId, 180, 'enableentitlement')
                         new_association = user_client.categoryEntry.add(cloned_association)
+                        # Call categoryEntry.reject after categoryEntry.add using an Admin KS with entitlements disabled
                         self.dest_client.categoryEntry.reject(new_association.id)
                     elif source_status == KalturaCategoryEntryStatus.DELETED:
                         # Do not migrate it
@@ -1840,10 +1841,10 @@ class KalturaEntryContentAndAssetsCloner:
         like_filter.entryIdEqual = source_entry.id
 
         # Fetch all the likes for the source entry
-        source_likes = self.source_client.like.list(like_filter)
+        source_likes = self.source_client.like.like.list(like_filter)
 
         # Loop through the source likes
         for source_like in source_likes.objects:
             # Use the user KS of result.userId and call client.like.like(entryId)
             user_client = self.clients_manager.get_dest_client_with_user_session(source_like.userId, 180)
-            user_client.like.like(cloned_entry.id)
+            user_client.like.like.like(cloned_entry.id)
