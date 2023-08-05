@@ -1659,29 +1659,30 @@ class KalturaEntryContentAndAssetsCloner:
                 try:
                     new_association:KalturaCategoryEntry = None
                     # Handle different statuses
-                    if source_association.status == KalturaCategoryEntryStatus.ACTIVE:
+                    source_status = source_association.status.getValue()
+                    if source_status == KalturaCategoryEntryStatus.ACTIVE:
                         # Use admin KS to add the categoryEntry
                         new_association = self.dest_client.categoryEntry.add(cloned_association)
-                    elif source_association.status == KalturaCategoryEntryStatus.PENDING:
+                    elif source_status == KalturaCategoryEntryStatus.PENDING:
                         # Switch to a user KS tied to categoryEntry.creatorUserId
                         user_client = self.clients_manager.get_dest_client_with_user_session(source_association.creatorUserId, 180)
                         new_association = user_client.categoryEntry.add(cloned_association)
-                    elif source_association.status == KalturaCategoryEntryStatus.REJECTED:
+                    elif source_status == KalturaCategoryEntryStatus.REJECTED:
                         # Call categoryEntry.reject after categoryEntry.add
                         user_client = self.clients_manager.get_dest_client_with_user_session(source_association.creatorUserId, 180)
                         new_association = user_client.categoryEntry.add(cloned_association)
                         self.dest_client.categoryEntry.reject(new_association.id)
-                    elif source_association.status == KalturaCategoryEntryStatus.DELETED:
+                    elif source_status == KalturaCategoryEntryStatus.DELETED:
                         # Do not migrate it
                         continue
                     else:
-                        self.logger.warning(f"Unknown status for source categoryEntry {source_association.id}. Skipping.", extra={'color': 'magenta'})
+                        self.logger.warning(f"Unknown status for source categoryEntry {source_association.categoryId}. Skipping.", extra={'color': 'magenta'})
                     # since categoryEntry obj doesn't have an ID attribute, we combine categoryId + userId into a unqiue id
                     self.logger.info(f"Cloned category-entry {new_association.categoryId} for entry src:  {source_association.entryId} / dest: {new_association.entryId}")
                 except Exception as error:
                     self.logger.critical(f"Failed to clone category-entry association for entry {source_association.entryId}. Error: {str(error)}", extra={'color': 'red'})
             
-            category_entry_src_id = str() + '||' + source_association.entryId
+            category_entry_src_id = str(source_association.categoryId) + '||' + source_association.entryId
             category_entry_dest_id = str(cloned_association.categoryId) + '||' + cloned_association.entryId
             cloned_association_ids[category_entry_src_id] = category_entry_dest_id
         # Return the list of cloned associations
