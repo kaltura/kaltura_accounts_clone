@@ -123,10 +123,14 @@ class KalturaClientsManager:
     
     @property
     def source_client(self):
+        if self._source_client is None:
+            raise ValueError("source_client has not been initialized")
         return self._source_client
     
     @property
     def dest_client(self):
+        if self._dest_client is None:
+            raise ValueError("dest_client has not been initialized")
         return self._dest_client
     
     def get_source_client_with_user_session(self, user_id, session_duration:int = None, session_privileges:str = None)->KalturaClient:
