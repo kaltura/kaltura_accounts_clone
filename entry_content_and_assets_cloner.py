@@ -64,7 +64,7 @@ class KalturaEntryContentAndAssetsCloner:
         """
         self.clients_manager = clients_manager
         self.source_client = self.clients_manager.source_client
-        self.dest_client =self.clients_manager.dest_client
+        self.dest_client = self.clients_manager.dest_client
         self.entry_mapping = {} # holds all cloned entries and their source ids
         self.entry_flavor_assets_mapping = {} # holds all cloned flavorAssets of the entries and their source ids
         self.entry_thumb_assets_mapping = {} # holds all cloned thumbAssets of the entries and their source ids
