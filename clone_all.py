@@ -64,7 +64,7 @@ class KalturaCloner:
                 'key': 'partner_account_configs',
                 'class': KalturaPartnerCloner,
                 'method': 'clone_partner',
-                'args': (self.config['source']['partner_id'], self.config['destination']['partner_id'])
+                'args': (self.config['source']['partner_id'], self.config['destination']['partner_id'], self.config['kaltura']['should_clone_account_configs'])
             },
             {'key': 'access_control_profiles', 'class': AccessControlProfileCloner, 'method': 'clone_access_control_profiles'},
             {'key': 'metadata_profiles', 'class': MetadataProfileCloner, 'method': 'clone_metadata_profiles'},

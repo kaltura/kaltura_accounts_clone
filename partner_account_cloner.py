@@ -27,7 +27,7 @@ class KalturaPartnerCloner:
         self.api_parser = KalturaApiSchemaParser()
         self.logger = create_custom_logger(logging.getLogger(__name__))
 
-    def clone_partner(self, source_partner_id: int, destination_partner_id: int) -> dict:
+    def clone_partner(self, source_partner_id: int, destination_partner_id: int, should_clone_account_configs:bool) -> dict:
         """
         Clone a partner account from the source Kaltura account to the destination account.
 
@@ -36,9 +36,8 @@ class KalturaPartnerCloner:
         if the update of the destination partner account fails.
 
         :param source_partner_id: The ID of the partner account to be cloned.
-        :type source_partner_id: int
         :param destination_partner_id: The ID of the partner account in the destination client.
-        :type destination_partner_id: int
+        :param should_clone_account_configs: If True, will attempt to clone the KalturaPartner configuration, if False, will skip this task
 
         :return: A dictionary mapping the ID of the source partner account to the ID of the cloned partner 
                  account in the destination client.
@@ -51,6 +50,9 @@ class KalturaPartnerCloner:
         dest_partner = self.dest_client.partner.get(destination_partner_id)
         if not dest_partner or not source_partner:
             raise Exception("Source or Destination partner not found")
+        
+        if not should_clone_account_configs:
+            return { "partner_account_configs" : { source_partner.id : dest_partner.id } }
             
         dest_partner_copy:KalturaPartner = self.api_parser.clone_kaltura_obj(source_partner)
         dest_partner_copy.id = destination_partner_id
