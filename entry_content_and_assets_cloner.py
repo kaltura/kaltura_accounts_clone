@@ -13,7 +13,7 @@ from KalturaClient.Plugins.Core import (
     KalturaBaseEntry, KalturaBaseEntryFilter, KalturaFilterPager, KalturaEntryType, KalturaEntryDisplayInSearchType, KalturaEntryModerationStatus,
     KalturaBaseEntryOrderBy, KalturaServiceBase, KalturaUserEntry, KalturaFlavorAsset, KalturaThumbAsset, KalturaFileAsset, 
     KalturaFlavorAssetFilter, KalturaThumbAssetFilter, KalturaFileAssetFilter, KalturaFileAssetObjectType, KalturaUploadToken,
-    KalturaUserEntryFilter, KalturaCategoryEntryFilter, KalturaEntryStatus, KalturaAssetFilter, KalturaAsset,
+    KalturaUserEntryFilter, KalturaCategoryEntryFilter, KalturaEntryStatus, KalturaAssetFilter, KalturaAsset, KalturaCategory,
     KalturaUrlResource, KalturaLanguage, KalturaFlavorAssetStatus, KalturaMediaType, KalturaLiveStreamAdminEntry,
     KalturaConversionProfile, KalturaFilter, KalturaCategoryEntry, KalturaMediaEntry, KalturaCategoryEntryStatus, KalturaDataEntry
 )
@@ -1641,19 +1641,25 @@ class KalturaEntryContentAndAssetsCloner:
         # Loop through the source associations
         for source_association in source_associations:
             # Create a new category association object based on the source association
-            cloned_association = KalturaCategoryEntry()
+            cloned_association:KalturaCategoryEntry = self.api_parser.clone_kaltura_obj(source_association)
             cloned_association.entryId = cloned_entry.id
             cloned_association.categoryId = self.categories_mapping.get(source_association.categoryId, NotImplemented)
             if cloned_association.categoryId is NotImplemented:
                 self.logger.critical(f"Could not find category-entry association mapping on src entry {source_association.entryId}", extra={'color': 'red'})
                 return None
-            cloned_association.status = source_association.status
+            
+            # get the privacyContext of the category
+            category:KalturaCategory = self.dest_client.category.get(cloned_association.categoryId)
+            privacy_contexts = category.privacyContexts
+            first_privacy_context = None if not privacy_contexts else privacy_contexts.split(",")[0]
+            privacy_context_privilege = '' if not first_privacy_context else ',privacycontext:' + first_privacy_context
             
             # if this association already exists, skip it
             base_filter = KalturaCategoryEntryFilter()
             base_filter.categoryIdEqual = cloned_association.categoryId
             base_filter.entryIdEqual = cloned_association.entryId
             category_entry_list = self.dest_client.categoryEntry.list(base_filter).objects
+            
             if len(category_entry_list) == 0:
                 # Try to add the new association to the destination client and save the returned object
                 try:
@@ -1665,14 +1671,14 @@ class KalturaEntryContentAndAssetsCloner:
                         new_association = self.dest_client.categoryEntry.add(cloned_association)
                     elif source_status == KalturaCategoryEntryStatus.PENDING:
                         # Switch to a user KS tied to categoryEntry.creatorUserId and entitlements enabled privilege
-                        user_client = self.clients_manager.get_dest_client_with_user_session(source_association.creatorUserId, 180, 'enableentitlement')
+                        user_client = self.clients_manager.get_dest_client_with_user_session(source_association.creatorUserId, 180, 'enableentitlement' + privacy_context_privilege)
                         new_association = user_client.categoryEntry.add(cloned_association)
                     elif source_status == KalturaCategoryEntryStatus.REJECTED:
                         # Switch to a user KS tied to categoryEntry.creatorUserId and entitlements enabled privilege
-                        user_client = self.clients_manager.get_dest_client_with_user_session(source_association.creatorUserId, 180, 'enableentitlement')
+                        user_client = self.clients_manager.get_dest_client_with_user_session(source_association.creatorUserId, 180, 'enableentitlement' + privacy_context_privilege)
                         new_association = user_client.categoryEntry.add(cloned_association)
                         # Call categoryEntry.reject after categoryEntry.add using an Admin KS with entitlements disabled
-                        self.dest_client.categoryEntry.reject(new_association.id)
+                        self.dest_client.categoryEntry.reject(new_association.entryId, new_association.categoryId)
                     elif source_status == KalturaCategoryEntryStatus.DELETED:
                         # Do not migrate it
                         continue
