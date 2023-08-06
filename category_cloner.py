@@ -160,7 +160,8 @@ class KalturaCategoryCloner:
             # Update the existing category-user association
             try:
                 dest_category_user = dest_category_users[0]
-                self.dest_client.categoryUser.update(dest_category.id, dest_category_user.userId, source_category_user_clone)
+                # update the existing categoryUser with override=True
+                self.dest_client.categoryUser.update(dest_category.id, dest_category_user.userId, source_category_user_clone, True)
                 self.logger.info(f'Updated user {source_category_user.userId} in category {dest_category.id}/{dest_category.name}')
             except KalturaException as e:
                 self.logger.error(f'Failed to update user {source_category_user.userId} in category {dest_category.id}/{dest_category.name}: {e}', extra={'color': 'red'})
@@ -203,33 +204,26 @@ class KalturaCategoryCloner:
         :param dest_category: The destination category.
         :type dest_category: KalturaCategory
         """
-        pager = KalturaFilterPager(pageSize=500)
+        pager = KalturaFilterPager()
+        pager.pageSize = 500
+        pager.pageIndex = 1
         filter = KalturaCategoryUserFilter()
         filter.orderBy = KalturaCategoryUserOrderBy.CREATED_AT_ASC
+        filter.categoryDirectMembers = False
         filter.categoryIdEqual = source_category.id
-        filter.createdAtGreaterThanOrEqual = 0
-
-        last_processed_at = None
-
+        filter.permissionLevelIn = "3,2,1,0"
+        
         while True:
-            source_category_users = self._list_with_retry(self.source_client.categoryUser, filter, pager).objects
-            
+            source_category_users = self.source_client.categoryUser.list(filter, pager).objects
+
             if not source_category_users:
                 break
 
             for source_category_user in source_category_users:
                 self._clone_category_user(source_category_user, dest_category)
 
-            last_category_user = source_category_users[-1]
+            pager.pageIndex += 1
             
-            if last_processed_at == last_category_user.createdAt:
-                pager.pageIndex += 1
-            else:
-                filter.createdAtGreaterThanOrEqual = last_category_user.createdAt
-                pager.pageIndex = 1
-            
-            last_processed_at = last_category_user.createdAt
-
     def clone_categories(self, custom_metadata_profiles_map: Dict, users_map: Dict) -> Dict[str, str]:
         """
         Clones all categories from the source client to the destination client.
