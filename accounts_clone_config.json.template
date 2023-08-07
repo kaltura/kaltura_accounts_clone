@@ -13,7 +13,8 @@
         "kaltura_user_id": "clone_metadata_profiles_script",
         "session_duration": 604800,
         "session_privileges": "all:*,disableentitlement",
-        "should_log": false
+        "should_log": false,
+        "should_clone_account_configs": false
     },
     "cloning": {
         "partner_account_configs": false,
